@@ -15,9 +15,9 @@ class CharacterAccuracy:
             vocab_size: Size of character vocabulary
             device: Device to place metric on
         """
-        self.metric = Accuracy(
-            task="multiclass", num_classes=vocab_size, ignore_index=-100
-        ).to(device)
+        self.metric = Accuracy(task="multiclass", num_classes=vocab_size, ignore_index=-100).to(
+            device
+        )
         self.device = device
 
     def update(self, predictions: torch.Tensor, labels: torch.Tensor):
@@ -78,7 +78,7 @@ class WordAccuracy:
         """
         pred_tokens = predictions.argmax(dim=-1)  # [batch, char_len]
 
-        for pred, original in zip(pred_tokens, original_words):
+        for pred, original in zip(pred_tokens, original_words, strict=True):
             # Decode and extract word up to EOS token
             pred_ids = pred.cpu().tolist()
 

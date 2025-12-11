@@ -89,7 +89,7 @@ def sample_path_points(data_points: list[dict], max_len: int) -> tuple:
         # Reconstruct points
         points = [
             {"x": float(x), "y": float(y), "t": float(t)}
-            for x, y, t in zip(x_interp, y_interp, t_interp)
+            for x, y, t in zip(x_interp, y_interp, t_interp, strict=True)
         ]
         mask = [1] * max_len
 

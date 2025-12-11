@@ -152,7 +152,7 @@ def test_training(num_steps=20, batch_size=32):
     from tqdm import tqdm
 
     step = 0
-    for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training")):
+    for _batch_idx, batch in enumerate(tqdm(train_loader, desc="Training")):
         if step >= num_steps:
             break
 

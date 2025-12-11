@@ -1,7 +1,6 @@
 """Configuration dataclasses for the swipe keyboard model."""
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from omegaconf import OmegaConf
 

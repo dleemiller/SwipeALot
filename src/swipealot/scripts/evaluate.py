@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from swipealot.data import ValidationCollator, SwipeDataset
+from swipealot.data import SwipeDataset, ValidationCollator
 from swipealot.models import SwipeTransformerModel
 from swipealot.training import CharacterAccuracy, WordAccuracy
 from swipealot.utils import batch_to_device, extract_character_logits
@@ -174,7 +174,9 @@ def main():
     )
     parser.add_argument("--show_examples", action="store_true", help="Show example predictions")
     parser.add_argument(
-        "--visualize", action="store_true", help="Create visualization of swipe paths and predictions"
+        "--visualize",
+        action="store_true",
+        help="Create visualization of swipe paths and predictions",
     )
     parser.add_argument(
         "--viz_samples", type=int, default=20, help="Number of samples to visualize"
@@ -205,11 +207,14 @@ def main():
         d_model = model_state["embeddings.path_embedding.projection.weight"].shape[0]
 
         # n_layers by counting encoder layers
-        n_layers = max(
-            int(key.split(".")[2])
-            for key in model_state.keys()
-            if key.startswith("encoder.layers.")
-        ) + 1
+        n_layers = (
+            max(
+                int(key.split(".")[2])
+                for key in model_state.keys()
+                if key.startswith("encoder.layers.")
+            )
+            + 1
+        )
 
         # d_ff from first linear layer
         d_ff = model_state["encoder.layers.0.linear1.weight"].shape[0]

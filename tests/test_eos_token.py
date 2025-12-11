@@ -1,6 +1,6 @@
 """Test EOS token implementation."""
 
-from swipealot.data import SwipeDataset
+from swipealot.data import MaskedCollator, SwipeDataset
 
 print("=" * 60)
 print("Testing EOS Token Implementation")
@@ -74,8 +74,6 @@ for word in test_words:
 print("\n" + "=" * 60)
 print("Testing EOS Token Masking")
 print("=" * 60)
-
-from swipealot.data import MaskedCollator
 
 collator = MaskedCollator(
     tokenizer=tokenizer,
