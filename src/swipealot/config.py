@@ -1,8 +1,9 @@
 """Configuration dataclasses for the swipe keyboard model."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
-import yaml
+from omegaconf import OmegaConf
 
 
 @dataclass
@@ -105,22 +106,28 @@ class Config:
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":
-        """Load configuration from YAML file."""
-        with open(path) as f:
-            config_dict = yaml.safe_load(f)
+        """
+        Load configuration from YAML file using OmegaConf.
 
-        model_config = ModelConfig(**config_dict.get("model", {}))
-        data_config = DataConfig(**config_dict.get("data", {}))
-        training_config = TrainingConfig(**config_dict.get("training", {}))
+        Provides validation, type checking, and better error messages.
+        Supports variable interpolation (e.g., ${model.d_model}).
+        """
+        # Load YAML and merge with structured config for validation
+        yaml_conf = OmegaConf.load(path)
 
-        return cls(model=model_config, data=data_config, training=training_config)
+        # Create structured config from dataclass (provides validation)
+        structured_conf = OmegaConf.structured(cls)
+
+        # Merge YAML onto structured config (validates types and structure)
+        merged = OmegaConf.merge(structured_conf, yaml_conf)
+
+        # Convert to regular dataclass instance
+        return OmegaConf.to_object(merged)
 
     def to_yaml(self, path: str) -> None:
-        """Save configuration to YAML file."""
-        config_dict = {
-            "model": self.model.__dict__,
-            "data": self.data.__dict__,
-            "training": self.training.__dict__,
-        }
-        with open(path, "w") as f:
-            yaml.dump(config_dict, f, default_flow_style=False)
+        """Save configuration to YAML file using OmegaConf."""
+        # Convert dataclass to OmegaConf
+        conf = OmegaConf.structured(self)
+
+        # Save to file
+        OmegaConf.save(conf, path)

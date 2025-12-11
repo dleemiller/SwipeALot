@@ -25,6 +25,10 @@ cu128 = [
     "seaborn>=0.13.2",  # For heatmaps
     "pyyaml>=6.0",  # For config files
     "numpy>=1.26.0",  # For data processing
+    # New dependencies for library simplification
+    "torchmetrics>=1.0.0",  # For metrics
+    "omegaconf>=2.3.0",  # For structured config validation
+    "lightning>=2.0.0",  # For checkpoint management
 ]
 dev = [
     "pytest>=8.3.3",
@@ -55,3 +59,7 @@ ignore = [
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

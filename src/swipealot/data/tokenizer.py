@@ -127,14 +127,21 @@ def compute_char_frequency_weights(
     """
     counts = torch.ones(tokenizer.vocab_size, dtype=torch.float)  # start at 1 for smoothing
 
+    # Collect all token IDs first for vectorized counting
+    all_token_ids = []
     for idx, sample in enumerate(dataset):
         if max_samples is not None and idx >= max_samples:
             break
 
         # Encode lowercase characters and append EOS (matches training labels)
         token_ids = tokenizer.encode(sample["word"]) + [tokenizer.eos_token_id]
-        for tid in token_ids:
-            counts[tid] += 1.0
+        all_token_ids.extend(token_ids)
+
+    # Use bincount for efficient vectorized counting
+    if all_token_ids:
+        token_tensor = torch.tensor(all_token_ids, dtype=torch.long)
+        bincount_result = torch.bincount(token_tensor, minlength=tokenizer.vocab_size).float()
+        counts = counts + bincount_result
 
     # Padding is never a supervised label, but keep a finite weight
     pad_id = tokenizer.pad_token_id

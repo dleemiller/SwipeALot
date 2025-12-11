@@ -48,60 +48,6 @@ def normalize_coordinates(
     return normalized
 
 
-def rotate_to_portrait(data_points: list[dict], orientation: str) -> list[dict]:
-    """
-    Rotate normalized coordinates into a canonical portrait frame.
-
-    Observed orientation values in the dataset: "portrait-primary" and
-    "landscape-primary" (others possible per ScreenOrientation API:
-    "portrait-secondary", "landscape-secondary"). We map them explicitly:
-      - portrait-primary:        no rotation
-      - portrait-secondary:      180° rotation
-      - landscape-primary:       90° counter-clockwise (device rotated CW)
-      - landscape-secondary:     90° clockwise (device rotated CCW)
-    Unknown values fall back to no rotation.
-    """
-    if not data_points:
-        return []
-
-    orient = (orientation or "").lower()
-
-    # Precompute rotation functions on normalized coordinates
-    def rot_none(pt):
-        return pt["x"], pt["y"]
-
-    def rot_180(pt):
-        return 1.0 - pt["x"], 1.0 - pt["y"]
-
-    def rot_cw(pt):
-        # 90° clockwise: (x, y) -> (y, 1 - x)
-        return pt["y"], 1.0 - pt["x"]
-
-    def rot_ccw(pt):
-        # 90° counter-clockwise: (x, y) -> (1 - y, x)
-        return 1.0 - pt["y"], pt["x"]
-
-    if orient == "portrait-primary":
-        rotate_fn = rot_none
-    elif orient == "portrait-secondary":
-        rotate_fn = rot_180
-    elif orient == "landscape-primary":
-        # Device rotated clockwise; rotate CCW to restore portrait
-        rotate_fn = rot_ccw
-    elif orient == "landscape-secondary":
-        # Device rotated counter-clockwise; rotate CW to restore portrait
-        rotate_fn = rot_cw
-    else:
-        rotate_fn = rot_none
-
-    rotated = []
-    for pt in data_points:
-        x_new, y_new = rotate_fn(pt)
-        rotated.append({"x": float(x_new), "y": float(y_new), "t": pt["t"]})
-
-    return rotated
-
-
 def sample_path_points(data_points: list[dict], max_len: int) -> tuple:
     """
     Sample or pad path points to fixed length using linear interpolation.
@@ -206,14 +152,9 @@ class SwipeDataset(Dataset):
         data_points = sample["data"]
         canvas_width = sample.get("canvas_width", 1.0)
         canvas_height = sample.get("canvas_height", 1.0)
-        orientation = sample.get("orientation", "portrait")
 
-        # Normalize coordinates
+        # Normalize coordinates (data is already in canonical orientation)
         normalized_points = normalize_coordinates(data_points, canvas_width, canvas_height)
-
-        # XX Rotate into a canonical portrait frame if needed
-        # data is already scaled and rotated
-        # normalized_points = rotate_to_portrait(normalized_points, orientation)
 
         # Sample/pad to fixed length
         path_coords, path_mask = sample_path_points(normalized_points, self.max_path_len)

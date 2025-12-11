@@ -1,14 +1,24 @@
 """Metrics for evaluating swipe keyboard model performance."""
 
 import torch
+from torchmetrics import Accuracy
 
 
 class CharacterAccuracy:
-    """Track character-level prediction accuracy."""
+    """Track character-level prediction accuracy using torchmetrics."""
 
-    def __init__(self):
-        self.correct = 0
-        self.total = 0
+    def __init__(self, vocab_size: int = 128, device: str = "cpu"):
+        """
+        Initialize metric.
+
+        Args:
+            vocab_size: Size of character vocabulary
+            device: Device to place metric on
+        """
+        self.metric = Accuracy(
+            task="multiclass", num_classes=vocab_size, ignore_index=-100
+        ).to(device)
+        self.device = device
 
     def update(self, predictions: torch.Tensor, labels: torch.Tensor):
         """
@@ -18,20 +28,30 @@ class CharacterAccuracy:
             predictions: [batch, seq_len, vocab_size] logits
             labels: [batch, seq_len] with -100 for non-masked positions
         """
+        # Get predicted tokens
         pred_tokens = predictions.argmax(dim=-1)
-        mask = labels != -100
 
-        self.correct += (pred_tokens[mask] == labels[mask]).sum().item()
-        self.total += mask.sum().item()
+        # Flatten for metric computation
+        pred_flat = pred_tokens.flatten()
+        labels_flat = labels.flatten()
+
+        # Update torchmetrics
+        self.metric.update(pred_flat, labels_flat)
 
     def compute(self) -> float:
         """Compute accuracy."""
-        return self.correct / self.total if self.total > 0 else 0.0
+        result = self.metric.compute()
+        return result.item() if isinstance(result, torch.Tensor) else float(result)
 
     def reset(self):
         """Reset metrics."""
-        self.correct = 0
-        self.total = 0
+        self.metric.reset()
+
+    def to(self, device):
+        """Move metric to device."""
+        self.device = device
+        self.metric = self.metric.to(device)
+        return self
 
 
 class WordAccuracy:

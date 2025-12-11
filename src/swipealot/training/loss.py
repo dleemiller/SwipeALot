@@ -73,20 +73,21 @@ class SwipeLoss(nn.Module):
             logits_supervised = char_logits_flat[mask]
             labels_supervised = char_labels_flat[mask]
 
-            log_probs = F.log_softmax(logits_supervised, dim=-1)
-            log_p = log_probs[
-                torch.arange(labels_supervised.size(0), device=log_probs.device), labels_supervised
-            ]
-            loss_terms = -log_p
+            # Use F.cross_entropy for cleaner implementation
+            loss_terms = F.cross_entropy(
+                logits_supervised, labels_supervised, reduction="none", weight=None
+            )
 
             # Optional class frequency weighting
             if self.char_class_weights is not None:
                 loss_terms = loss_terms * self.char_class_weights[labels_supervised]
 
-            # Optional focal modulation
+            # Optional focal modulation (focal loss formulation)
             if self.focal_gamma > 0.0:
-                pt = log_p.exp()
-                loss_terms = ((1 - pt) ** self.focal_gamma) * loss_terms
+                # Compute pt (probability of true class) for focal weighting
+                pt = torch.exp(-loss_terms)  # Since loss = -log(pt), pt = exp(-loss)
+                focal_weight = (1 - pt) ** self.focal_gamma
+                loss_terms = focal_weight * loss_terms
 
             char_loss = loss_terms.mean()
         else:
@@ -172,28 +173,28 @@ class SwipeLoss(nn.Module):
                 query_indices = torch.arange(sim.size(0), device=sim.device)
 
             if query_indices.numel() > 0:
-                # For each query, find its positive
-                pos_indices = pos_mask.nonzero(as_tuple=False)
-                # Filter to only queries
-                pos_indices = pos_indices[torch.isin(pos_indices[:, 0], query_indices)]
+                # Vectorized: get positive mask for queries [num_queries, N]
+                query_pos_mask = pos_mask[query_indices]
 
-                if pos_indices.numel() > 0:
-                    # Compute log-softmax over row for queries
-                    logsumexp = torch.logsumexp(sim[query_indices], dim=1)
-                    # Gather positive sims per query
-                    pos_sim_list = []
-                    for i, query_idx in enumerate(query_indices):
-                        # Find the positive for this query
-                        pos_for_query = pos_indices[pos_indices[:, 0] == query_idx]
-                        if pos_for_query.numel() > 0:
-                            pos_idx = pos_for_query[0, 1]
-                            pos_sim_list.append(sim[query_idx, pos_idx])
+                # Check which queries have at least one positive
+                has_positive = query_pos_mask.any(dim=1)
 
-                    if pos_sim_list:
-                        pos_sims = torch.stack(pos_sim_list)
-                        contrastive_loss = -(pos_sims - logsumexp).mean()
-                    else:
-                        contrastive_loss = torch.tensor(0.0, device=sim.device)
+                if has_positive.any():
+                    # Filter to queries with positives
+                    valid_query_indices = query_indices[has_positive]
+                    valid_pos_mask = query_pos_mask[has_positive]
+
+                    # For each query, get index of first positive
+                    first_pos_idx = valid_pos_mask.byte().argmax(dim=1)
+
+                    # Gather positive similarities
+                    pos_sims = sim[valid_query_indices, first_pos_idx]
+
+                    # Compute log-sum-exp for these queries
+                    logsumexp = torch.logsumexp(sim[valid_query_indices], dim=1)
+
+                    # InfoNCE loss: -log(exp(pos) / sum(exp(all)))
+                    contrastive_loss = -(pos_sims - logsumexp).mean()
                 else:
                     contrastive_loss = torch.tensor(0.0, device=sim.device)
             else:

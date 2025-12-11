@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from swipealot.data import MaskedCollator, SwipeDataset
+from swipealot.data import ValidationCollator, SwipeDataset
 from swipealot.models import SwipeTransformerModel
 from swipealot.training import CharacterAccuracy, WordAccuracy
 from swipealot.utils import batch_to_device, extract_character_logits
@@ -28,7 +28,7 @@ def evaluate_model(model, test_loader, tokenizer, device):
     """
     model.eval()
 
-    char_accuracy = CharacterAccuracy()
+    char_accuracy = CharacterAccuracy(vocab_size=tokenizer.vocab_size, device=str(device))
     word_accuracy = WordAccuracy(tokenizer)
 
     all_predictions = []
@@ -284,13 +284,9 @@ def main():
         max_samples=args.num_samples,
     )
 
-    # For evaluation we leave swipe paths untouched and mask all characters.
-    collator = MaskedCollator(
-        tokenizer=tokenizer,
-        char_mask_prob=1.0,  # mask every character token (including EOS)
-        path_mask_prob=0.0,  # never mask path points
-        mask_path=False,  # keep paths unmasked
-    )
+    # For evaluation, use ValidationCollator which provides deterministic results
+    # (no random masking, evaluates full reconstruction from unmasked input)
+    collator = ValidationCollator(tokenizer=tokenizer)
 
     test_loader = DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collator

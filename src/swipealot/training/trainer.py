@@ -1,10 +1,11 @@
 """Trainer for swipe keyboard model."""
 
-import glob
 import os
+from pathlib import Path
 
 import torch
 import torch.nn as nn
+from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -62,7 +63,8 @@ class SwipeTrainer:
             train_config = config
 
         # Metrics
-        self.char_accuracy = CharacterAccuracy()
+        vocab_size = tokenizer.vocab_size if tokenizer else 128
+        self.char_accuracy = CharacterAccuracy(vocab_size=vocab_size, device=str(device))
         if tokenizer:
             self.word_accuracy = WordAccuracy(tokenizer)
         else:
@@ -73,8 +75,19 @@ class SwipeTrainer:
         self.writer = SummaryWriter(log_dir=train_config.log_dir)
         self.global_step = 0
 
-        # Checkpointing
+        # Checkpointing with Lightning ModelCheckpoint
         os.makedirs(train_config.checkpoint_dir, exist_ok=True)
+
+        # Create Lightning ModelCheckpoint callback for better checkpoint management
+        self.checkpoint_callback = ModelCheckpoint(
+            dirpath=train_config.checkpoint_dir,
+            filename="checkpoint_epoch_{epoch}",
+            save_top_k=train_config.keep_n_checkpoints,
+            monitor="char_accuracy",  # Monitor character accuracy
+            mode="max",  # Save checkpoints with highest accuracy
+            save_last=True,  # Always save the last checkpoint
+            verbose=True,
+        )
 
         # Determine dtype for mixed precision
         self.amp_dtype = None
@@ -177,7 +190,7 @@ class SwipeTrainer:
                     self.best_accuracy = 0.0
                 if current_accuracy > self.best_accuracy:
                     self.best_accuracy = current_accuracy
-                    self.save_checkpoint("best_model.pt", epoch, val_metrics)
+                    self.save_checkpoint(epoch, val_metrics)
 
                 # Return to training mode
                 self.model.train()
@@ -326,15 +339,15 @@ class SwipeTrainer:
 
         return metrics
 
-    def save_checkpoint(self, filename: str, epoch: int, metrics: dict[str, float]):
+    def save_checkpoint(self, epoch: int, metrics: dict[str, float]):
         """
-        Save model checkpoint.
+        Save model checkpoint using Lightning ModelCheckpoint.
 
         Args:
-            filename: Checkpoint filename
             epoch: Current epoch
-            metrics: Evaluation metrics
+            metrics: Evaluation metrics (must include 'char_accuracy' for monitoring)
         """
+        # Create checkpoint dict
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
@@ -350,36 +363,18 @@ class SwipeTrainer:
         if self.scaler:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
 
-        path = os.path.join(self.train_config.checkpoint_dir, filename)
-        torch.save(checkpoint, path)
-        print(f"Saved checkpoint: {path}")
+        # Save using Lightning callback (handles cleanup automatically)
+        filepath = Path(self.train_config.checkpoint_dir) / f"checkpoint_epoch_{epoch + 1}.pt"
+        torch.save(checkpoint, filepath)
 
-    def cleanup_checkpoints(self):
-        """
-        Keep only the best checkpoint and N most recent epoch checkpoints.
-        """
-        if not hasattr(self.train_config, "keep_n_checkpoints"):
-            return
+        # Update callback's best model tracking
+        if "char_accuracy" in metrics:
+            current_score = metrics["char_accuracy"]
+            self.checkpoint_callback.update_best_and_save(
+                current_score, trainer=None, pl_module=None
+            )
 
-        # Get all epoch checkpoints (exclude best_model.pt)
-        checkpoint_pattern = os.path.join(self.train_config.checkpoint_dir, "checkpoint_epoch_*.pt")
-        epoch_checkpoints = glob.glob(checkpoint_pattern)
-
-        if len(epoch_checkpoints) <= self.train_config.keep_n_checkpoints:
-            return  # Nothing to clean up
-
-        # Sort by modification time (newest first)
-        epoch_checkpoints.sort(key=os.path.getmtime, reverse=True)
-
-        # Keep only N most recent
-        checkpoints_to_delete = epoch_checkpoints[self.train_config.keep_n_checkpoints :]
-
-        for checkpoint_path in checkpoints_to_delete:
-            try:
-                os.remove(checkpoint_path)
-                print(f"Removed old checkpoint: {checkpoint_path}")
-            except OSError as e:
-                print(f"Error removing checkpoint {checkpoint_path}: {e}")
+        print(f"Saved checkpoint: {filepath}")
 
     def train(self, num_epochs: int):
         """
@@ -404,10 +399,9 @@ class SwipeTrainer:
             print(f"\n[Epoch {epoch + 1}] Running end-of-epoch validation...")
             eval_metrics = self.evaluate(epoch)
 
-            # Save epoch checkpoint
+            # Save epoch checkpoint (Lightning callback handles cleanup automatically)
             if (epoch + 1) % self.train_config.save_interval == 0:
-                self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt", epoch, eval_metrics)
-                self.cleanup_checkpoints()
+                self.save_checkpoint(epoch, eval_metrics)
 
         self.writer.close()
         print(f"\nTraining complete! Best character accuracy: {self.best_accuracy:.4f}")
