@@ -52,14 +52,27 @@ class SwipeTransformerModel(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
 
+    # def _init_weights(self, module):
+    #     """Initialize weights following standard practice."""
+    #     if isinstance(module, nn.Linear):
+    #         nn.init.normal_(module.weight, std=0.02)
+    #         if module.bias is not None:
+    #             nn.init.zeros_(module.bias)
+    #     elif isinstance(module, nn.Embedding):
+    #         nn.init.normal_(module.weight, std=0.02)
+    #     elif isinstance(module, nn.LayerNorm):
+    #         nn.init.ones_(module.weight)
+    #         nn.init.zeros_(module.bias)
+
     def _init_weights(self, module):
-        """Initialize weights following standard practice."""
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, std=0.02)
+            nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, std=0.02)
+            nn.init.uniform_(module.weight, -0.1, 0.1)
+
         elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)

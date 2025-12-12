@@ -430,3 +430,88 @@ class ValidationCollator:
             "attention_mask": attention_mask,
             "words": [item["word"] for item in batch],
         }
+
+
+class CrossEncoderCollator:
+    """
+    Collator for cross-encoder training with Multiple Negatives Ranking Loss.
+
+    Batches (path, positive, negative_1, ..., negative_n) tuples.
+    Each query has 1 positive + N negatives.
+    """
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, batch):
+        """
+        Collate batch of cross-encoder samples.
+
+        Input: List of dicts with:
+            - path_coords: [path_len, 3]
+            - positive_word: [word_len]
+            - negative_words: [num_negatives, word_len]
+
+        Output: Dict with:
+            - path_coords: [batch * (1+N), path_len, 3]  # Repeated for each word
+            - char_tokens: [batch * (1+N), word_len]     # Positive + negatives
+            - attention_mask: [batch * (1+N), seq_len]
+            - labels: [batch] with value 0 (positive is always first in each group)
+            - group_sizes: [batch] with value (1+N) for each query
+        """
+        batch_size = len(batch)
+        num_negatives = batch[0]["negative_words"].shape[0]
+        docs_per_query = 1 + num_negatives  # 1 positive + N negatives
+
+        # Lists to accumulate all pairs
+        all_path_coords = []
+        all_path_masks = []
+        all_char_tokens = []
+        all_char_masks = []
+
+        # Process each query
+        for item in batch:
+            path_coords = item["path_coords"]  # [path_len, 3]
+            path_mask = item["path_mask"]  # [path_len]
+
+            # Positive pair
+            all_path_coords.append(path_coords)
+            all_path_masks.append(path_mask)
+            all_char_tokens.append(item["positive_word"])
+            all_char_masks.append(item["positive_mask"])
+
+            # Negative pairs
+            for i in range(num_negatives):
+                all_path_coords.append(path_coords)  # Same path repeated
+                all_path_masks.append(path_mask)
+                all_char_tokens.append(item["negative_words"][i])
+                all_char_masks.append(item["negative_masks"][i])
+
+        # Stack all pairs
+        path_coords = torch.stack(all_path_coords)  # [batch*(1+N), path_len, 3]
+        path_mask = torch.stack(all_path_masks)  # [batch*(1+N), path_len]
+        char_tokens = torch.stack(all_char_tokens)  # [batch*(1+N), word_len]
+        char_mask = torch.stack(all_char_masks)  # [batch*(1+N), word_len]
+
+        # Create attention mask: [CLS] + path + [SEP] + chars
+        batch_pairs = path_coords.shape[0]
+        cls_mask = torch.ones(batch_pairs, 1, dtype=torch.long)
+        sep_mask = torch.ones(batch_pairs, 1, dtype=torch.long)
+        attention_mask = torch.cat([cls_mask, path_mask, sep_mask, char_mask], dim=1)
+
+        # Labels: positive is always at index 0 within each group
+        labels = torch.zeros(batch_size, dtype=torch.long)
+
+        # Group sizes: how many docs per query
+        group_sizes = torch.full((batch_size,), docs_per_query, dtype=torch.long)
+
+        return {
+            "path_coords": path_coords,
+            "char_tokens": char_tokens,
+            "path_mask": path_mask,
+            "char_mask": char_mask,
+            "attention_mask": attention_mask,
+            "labels": labels,  # Positive is always index 0
+            "group_sizes": group_sizes,  # For reshaping scores
+            "batch_size": batch_size,  # Original batch size
+        }

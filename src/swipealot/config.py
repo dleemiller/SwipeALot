@@ -96,6 +96,88 @@ class TrainingConfig:
 
 
 @dataclass
+class CrossEncoderDataConfig:
+    """Data configuration for cross-encoder training."""
+
+    # Dataset
+    dataset_name: str = "futo-org/swipe.futo.org"
+    train_split: str = "train"
+    val_split: str = "validation"
+    test_split: str = "test"
+
+    # Negative mining
+    negative_pool_path: str | None = None
+    num_negatives: int = 3  # Number of negatives per positive (1:3 ratio)
+    difficulty_sampling: bool = True  # Sample negatives by difficulty score
+
+    # Sequence lengths
+    max_path_len: int = 64
+    max_word_len: int = 48
+
+    # DataLoader
+    batch_size: int = 256
+    num_workers: int = 4
+
+
+@dataclass
+class CrossEncoderTrainingConfig:
+    """Training configuration for cross-encoder."""
+
+    # Pretrained model
+    base_checkpoint: str | None = None  # Path to pretrained encoder checkpoint
+
+    # Encoder freezing
+    freeze_encoder: bool = True  # Freeze encoder during training
+
+    # Optimization
+    head_learning_rate: float = 1e-4  # LR for classification head
+    encoder_learning_rate: float = 5e-6  # LR for encoder (when unfrozen)
+    weight_decay: float = 0.01
+    num_epochs: int = 10
+    warmup_steps: int = 500
+
+    # Loss
+    mnr_scale: float = 10.0  # Temperature scaling for MNR loss
+
+    # Logging and checkpointing
+    log_interval: int = 100
+    val_interval: int = 500
+    save_interval: int = 1
+    keep_n_checkpoints: int = 2
+    log_dir: str = "logs/cross_encoder"
+    checkpoint_dir: str = "checkpoints/cross_encoder"
+
+    # Device
+    device: str = "cuda"
+
+    # Mixed precision
+    use_amp: bool = True
+    amp_dtype: str = "bfloat16"
+
+
+@dataclass
+class CrossEncoderConfig:
+    """Complete configuration for cross-encoder training."""
+
+    model: ModelConfig = field(default_factory=ModelConfig)
+    data: CrossEncoderDataConfig = field(default_factory=CrossEncoderDataConfig)
+    training: CrossEncoderTrainingConfig = field(default_factory=CrossEncoderTrainingConfig)
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "CrossEncoderConfig":
+        """Load configuration from YAML file."""
+        yaml_conf = OmegaConf.load(path)
+        structured_conf = OmegaConf.structured(cls)
+        merged = OmegaConf.merge(structured_conf, yaml_conf)
+        return OmegaConf.to_object(merged)
+
+    def to_yaml(self, path: str) -> None:
+        """Save configuration to YAML file."""
+        conf = OmegaConf.structured(self)
+        OmegaConf.save(conf, path)
+
+
+@dataclass
 class Config:
     """Complete configuration combining all sub-configs."""
 
