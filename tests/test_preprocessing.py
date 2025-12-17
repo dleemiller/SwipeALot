@@ -8,7 +8,6 @@ from swipealot.data.preprocessing import (
     sample_path_points_with_features,
 )
 
-
 # Tests for motion-aware features
 
 
@@ -115,7 +114,15 @@ def test_sample_path_points_with_features_upsampling():
     """Test upsampling short paths via interpolation."""
     points = [
         {"x": 0.0, "y": 0.0, "dx": 0.0, "dy": 0.0, "ds": 0.0, "dt": 0.0, "log_dt": 0.0},
-        {"x": 1.0, "y": 1.0, "dx": 1.0, "dy": 1.0, "ds": np.sqrt(2.0), "dt": 10.0, "log_dt": np.log1p(10.0)},
+        {
+            "x": 1.0,
+            "y": 1.0,
+            "dx": 1.0,
+            "dy": 1.0,
+            "ds": np.sqrt(2.0),
+            "dt": 10.0,
+            "log_dt": np.log1p(10.0),
+        },
     ]
     features, mask = sample_path_points_with_features(points, max_len=4)
 

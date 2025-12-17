@@ -173,7 +173,9 @@ class SwipeProcessor(ProcessorMixin):
                     for path in path_coords.cpu().numpy():
                         raw = [{"x": float(p[0]), "y": float(p[1]), "t": float(p[2])} for p in path]
                         features = normalize_and_compute_features(raw)
-                        path_feats, mask = sample_path_points_with_features(features, self.max_path_len)
+                        path_feats, mask = sample_path_points_with_features(
+                            features, self.max_path_len
+                        )
                         processed_paths.append(path_feats)
                         path_masks.append(mask)
 
@@ -194,7 +196,9 @@ class SwipeProcessor(ProcessorMixin):
                     for path in path_coords.detach().cpu().numpy():
                         raw = [{"x": float(p[0]), "y": float(p[1]), "t": float(p[2])} for p in path]
                         features = normalize_and_compute_features(raw)
-                        path_feats, mask = sample_path_points_with_features(features, self.max_path_len)
+                        path_feats, mask = sample_path_points_with_features(
+                            features, self.max_path_len
+                        )
                         processed_paths.append(path_feats)
                         path_masks.append(mask)
 
@@ -377,12 +381,10 @@ class SwipeProcessor(ProcessorMixin):
         for config_name in ["preprocessor_config.json", "processor_config.json"]:
             processor_config_path = Path(save_directory) / config_name
             if processor_config_path.exists():
-                with open(processor_config_path, "r") as f:
+                with open(processor_config_path) as f:
                     config = json.load(f)
 
-                config["auto_map"] = {
-                    "AutoProcessor": "processing_swipe.SwipeProcessor"
-                }
+                config["auto_map"] = {"AutoProcessor": "processing_swipe.SwipeProcessor"}
 
                 with open(processor_config_path, "w") as f:
                     json.dump(config, f, indent=2)

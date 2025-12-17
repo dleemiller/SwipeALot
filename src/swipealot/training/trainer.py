@@ -5,7 +5,7 @@ import logging
 import torch
 from transformers import Trainer
 
-from .metrics import CharacterAccuracy, WordAccuracy
+from .metrics import CharacterAccuracy
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,10 @@ class SwipeTrainer(Trainer):
 
         # Save tokenizer and processor for hub-ready checkpoints
         try:
-            from swipealot.huggingface import SwipeTokenizer, SwipeProcessor
+            from swipealot.huggingface import SwipeProcessor, SwipeTokenizer
 
             # Get CharacterTokenizer from data_collator
-            if hasattr(self.data_collator, 'tokenizer'):
+            if hasattr(self.data_collator, "tokenizer"):
                 char_tokenizer = self.data_collator.tokenizer
 
                 # Wrap in SwipeTokenizer
@@ -195,7 +195,9 @@ def create_compute_metrics_fn(tokenizer):
             # path_len = total_seq_len - 1 (CLS) - 1 (SEP) - char_len
             path_len = total_seq_len - 2 - char_len
             char_start = 1 + path_len + 1  # After [CLS] + path + [SEP]
-            char_logits = predictions[:, char_start:char_start + char_len, :]  # [batch, char_len, vocab_size]
+            char_logits = predictions[
+                :, char_start : char_start + char_len, :
+            ]  # [batch, char_len, vocab_size]
 
             char_labels = labels
 

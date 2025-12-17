@@ -8,7 +8,6 @@ from transformers import PreTrainedModel
 from transformers.modeling_outputs import (
     BaseModelOutputWithPooling,
     ModelOutput,
-    SequenceClassifierOutput,
 )
 
 from .configuration_swipe import SwipeTransformerConfig
@@ -132,7 +131,9 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         # Length prediction head (predicts word length from path)
         # Max length is max_char_len (including EOS)
-        self.length_head = LengthPredictionHead(d_model=config.d_model) if config.predict_length else None
+        self.length_head = (
+            LengthPredictionHead(d_model=config.d_model) if config.predict_length else None
+        )
 
         # Initialize weights
         self.post_init()
@@ -253,7 +254,6 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
             pooler_output=pooler_output,
             hidden_states=(hidden_states,) if output_hidden_states else None,
         )
-
 
 
 class SwipeModel(SwipeTransformerPreTrainedModel):

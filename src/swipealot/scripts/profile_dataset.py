@@ -68,7 +68,7 @@ def profile_time_deltas(dataset_name: str = "futo-org/swipe.futo.org", n_samples
     # Check for outliers
     outliers_low = (dts_array < 0.1).sum()
     outliers_high = (dts_array > 1000).sum()
-    print(f"Outliers:")
+    print("Outliers:")
     print(f"  < 0.1 ms:    {outliers_low:,} ({100 * outliers_low / len(dts_array):.2f}%)")
     print(f"  > 1000 ms:   {outliers_high:,} ({100 * outliers_high / len(dts_array):.2f}%)")
 
@@ -171,10 +171,16 @@ def profile_time_deltas(dataset_name: str = "futo-org/swipe.futo.org", n_samples
     paths_over_128 = (path_lengths > 128).sum()
     paths_under_128 = (path_lengths < 128).sum()
     print()
-    print(f"Path length distribution:")
-    print(f"  > 128 points: {paths_over_128:,} ({100 * paths_over_128 / len(path_lengths):.1f}%) - will downsample")
-    print(f"  < 128 points: {paths_under_128:,} ({100 * paths_under_128/ len(path_lengths):.1f}%) - will upsample")
-    print(f"  = 128 points: {(path_lengths == 128).sum():,} ({100 * (path_lengths == 128).sum() / len(path_lengths):.1f}%)")
+    print("Path length distribution:")
+    print(
+        f"  > 128 points: {paths_over_128:,} ({100 * paths_over_128 / len(path_lengths):.1f}%) - will downsample"
+    )
+    print(
+        f"  < 128 points: {paths_under_128:,} ({100 * paths_under_128 / len(path_lengths):.1f}%) - will upsample"
+    )
+    print(
+        f"  = 128 points: {(path_lengths == 128).sum():,} ({100 * (path_lengths == 128).sum() / len(path_lengths):.1f}%)"
+    )
 
     print("\n" + "=" * 60)
 
@@ -187,9 +193,7 @@ def main():
         default="futo-org/swipe.futo.org",
         help="HuggingFace dataset name",
     )
-    parser.add_argument(
-        "--n-samples", type=int, default=10000, help="Number of samples to profile"
-    )
+    parser.add_argument("--n-samples", type=int, default=10000, help="Number of samples to profile")
     args = parser.parse_args()
 
     profile_time_deltas(args.dataset, args.n_samples)

@@ -2,7 +2,12 @@
 
 import torch
 
-from swipealot.data import CharacterTokenizer, MaskedCollator, PairwiseMaskedCollator, ValidationCollator
+from swipealot.data import (
+    CharacterTokenizer,
+    MaskedCollator,
+    PairwiseMaskedCollator,
+    ValidationCollator,
+)
 from swipealot.huggingface import SwipeProcessor
 
 
@@ -10,7 +15,9 @@ def _sample(tokenizer: CharacterTokenizer, word: str, path_len: int, char_len: i
     token_ids = tokenizer.encode(word) + [tokenizer.eos_token_id]
     token_ids = token_ids[: char_len - 1] + [tokenizer.eos_token_id]
     token_ids = token_ids + [tokenizer.pad_token_id] * (char_len - len(token_ids))
-    char_mask = torch.tensor([1 if t != tokenizer.pad_token_id else 0 for t in token_ids], dtype=torch.long)
+    char_mask = torch.tensor(
+        [1 if t != tokenizer.pad_token_id else 0 for t in token_ids], dtype=torch.long
+    )
     return {
         "path_coords": torch.randn(path_len, 6),
         "path_mask": torch.ones(path_len, dtype=torch.long),
@@ -140,7 +147,9 @@ def test_processor_attention_when_text_missing():
     char_attn = inputs["attention_mask"][0, -(processor.max_char_len) :]
     assert torch.all(char_attn == 0)
     # Path portion attends; length matches 1+path+1+chars
-    assert inputs["attention_mask"].shape[1] == 1 + processor.max_path_len + 1 + processor.max_char_len
+    assert (
+        inputs["attention_mask"].shape[1] == 1 + processor.max_path_len + 1 + processor.max_char_len
+    )
 
 
 def test_pairwise_collator_zero_attention_prob():

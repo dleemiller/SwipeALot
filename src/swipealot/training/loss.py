@@ -167,7 +167,11 @@ class SwipeLoss(nn.Module):
         losses["char_loss"] = char_loss
 
         # Path prediction loss (if enabled)
-        has_path_pred = "path_coords_pred" in outputs if isinstance(outputs, dict) else hasattr(outputs, "path_coords_pred")
+        has_path_pred = (
+            "path_coords_pred" in outputs
+            if isinstance(outputs, dict)
+            else hasattr(outputs, "path_coords_pred")
+        )
         if has_path_pred and batch.get("path_labels") is not None:
             if isinstance(outputs, dict):
                 path_pred = outputs["path_coords_pred"]  # [batch, full_seq_len, 3]
@@ -203,7 +207,11 @@ class SwipeLoss(nn.Module):
             total_loss = total_loss + self.path_weight * losses["path_loss"]
 
         # CLS length prediction (optional)
-        has_length_logits = "length_logits" in outputs if isinstance(outputs, dict) else hasattr(outputs, "length_logits")
+        has_length_logits = (
+            "length_logits" in outputs
+            if isinstance(outputs, dict)
+            else hasattr(outputs, "length_logits")
+        )
         if (
             self.length_weight > 0.0
             and has_length_logits
@@ -229,7 +237,9 @@ class SwipeLoss(nn.Module):
         if self.contrastive_weight > 0.0 and "pair_ids" in batch:
             # Use last_hidden_state (always available) instead of hidden_states (only with output_hidden_states=True)
             if isinstance(outputs, dict):
-                hidden_states = outputs.get("last_hidden_state", outputs.get("hidden_states"))  # [N, seq_len, d]
+                hidden_states = outputs.get(
+                    "last_hidden_state", outputs.get("hidden_states")
+                )  # [N, seq_len, d]
             else:
                 hidden_states = outputs.last_hidden_state  # [N, seq_len, d]
             pair_ids = batch["pair_ids"]  # [N]

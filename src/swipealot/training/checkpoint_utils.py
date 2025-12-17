@@ -55,9 +55,7 @@ def prepare_checkpoint_for_hub(output_dir: str | Path) -> None:
                 if filename == "modeling_swipe.py":
                     content = dest_file.read_text()
                     # Change relative imports to flat structure
-                    content = content.replace(
-                        "from ..models.embeddings", "from .embeddings"
-                    )
+                    content = content.replace("from ..models.embeddings", "from .embeddings")
                     content = content.replace("from ..models.heads", "from .heads")
                     dest_file.write_text(content)
 
@@ -102,7 +100,7 @@ def prepare_checkpoint_for_hub(output_dir: str | Path) -> None:
         # Update config.json with auto_map for AutoModel loading
         config_path = output_dir / "config.json"
         if config_path.exists():
-            with open(config_path, "r") as f:
+            with open(config_path) as f:
                 config_dict = json.load(f)
 
             config_dict["auto_map"] = {
