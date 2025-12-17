@@ -21,12 +21,12 @@ class SwipeTransformerOutput(ModelOutput):
     Args:
         loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
             Language modeling loss (character prediction).
-        char_logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, vocab_size)`):
-            Prediction scores of the character prediction head.
-        path_logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, 3)`, *optional*):
-            Prediction scores of the path prediction head (if enabled).
-        length_logits (`torch.FloatTensor` of shape `(batch_size, max_length+1)`, *optional*):
-            Prediction scores of the length prediction head (if enabled).
+        char_logits (`torch.FloatTensor` of shape `(batch_size, char_length, vocab_size)`):
+            Prediction scores of the character prediction head (text segment only).
+        path_logits (`torch.FloatTensor` of shape `(batch_size, path_length, path_input_dim)`, *optional*):
+            Prediction scores of the path prediction head (path segment only, if enabled).
+        length_logits (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+            Predicted length from the length head (if enabled).
         last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
             Sequence of hidden-states at the output of the last layer of the model.
         pooler_output (`torch.FloatTensor` of shape `(batch_size, hidden_size)`):
@@ -125,7 +125,9 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
         )
 
         if config.predict_path:
-            self.path_head = PathPredictionHead(d_model=config.d_model)
+            self.path_head = PathPredictionHead(
+                d_model=config.d_model, output_dim=config.path_input_dim
+            )
         else:
             self.path_head = None
 
@@ -210,13 +212,22 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
         # Encode (batch_first=True is set in TransformerEncoderLayer)
         hidden_states = self.encoder(embeddings, src_key_padding_mask=src_key_padding_mask)
 
-        # Character prediction
-        char_logits = self.char_head(hidden_states) if self.char_head is not None else None
+        path_len = path_coords.shape[1]
+        char_len = input_ids.shape[1]
 
-        # Path prediction (if enabled)
+        # Character prediction (text segment only)
+        char_logits = None
+        if self.char_head is not None:
+            # Sequence is: [CLS] + path + [SEP] + chars
+            char_start = 1 + path_len + 1
+            char_hidden = hidden_states[:, char_start : char_start + char_len, :]
+            char_logits = self.char_head(char_hidden)
+
+        # Path prediction (path segment only, if enabled)
         path_logits = None
         if self.path_head is not None:
-            path_logits = self.path_head(hidden_states)
+            path_hidden = hidden_states[:, 1 : 1 + path_len, :]
+            path_logits = self.path_head(path_hidden)
 
         # Length prediction from CLS token
         cls_hidden = hidden_states[:, 0, :]  # [batch, d_model] - CLS at position 0
@@ -224,7 +235,6 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         # Extract SEP token embedding for pooler output (embeddings/similarity tasks)
         # SEP is at position 1 + path_len
-        path_len = path_coords.shape[1]
         sep_position = 1 + path_len
         pooler_output = hidden_states[:, sep_position, :]  # [batch, d_model]
 
@@ -232,11 +242,8 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
         loss = None
         if char_labels is not None and self.char_head is not None:
             loss_fct = nn.CrossEntropyLoss(ignore_index=self.config.pad_token_id)
-            # Extract character positions from hidden states
-            # Sequence is: [CLS] + path + [SEP] + chars
-            char_start = 1 + path_len + 1  # After [CLS], path, and [SEP]
-            char_hidden = hidden_states[:, char_start : char_start + char_labels.shape[1], :]
-            char_pred = self.char_head(char_hidden)
+            # Predict only the text segment
+            char_pred = char_logits
             loss = loss_fct(char_pred.reshape(-1, self.config.vocab_size), char_labels.reshape(-1))
 
         if not return_dict:

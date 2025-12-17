@@ -10,6 +10,7 @@ from transformers import TrainingArguments
 
 from swipealot.config import Config
 from swipealot.data import (
+    CharacterTokenizer,
     MaskedCollator,
     PairwiseMaskedCollator,
     SwipeDataset,
@@ -74,17 +75,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: [green]{device}[/green]")
 
-    # Build tokenizer from training data
-    logger.info("Building tokenizer...")
-    # Load small sample to build vocabulary
-    sample_dataset = SwipeDataset(
-        split=config.data.train_split,
-        max_path_len=config.data.max_path_len,
-        max_word_len=config.data.max_char_len,
-        dataset_name=config.data.dataset_name,
-        max_samples=10000,  # Use subset for vocab building
-    )
-    tokenizer = sample_dataset.tokenizer
+    # Tokenizer is deterministic (not dataset-derived)
+    logger.info("Creating tokenizer...")
+    tokenizer = CharacterTokenizer()
     config.model.vocab_size = tokenizer.vocab_size
     logger.info(f"Vocabulary size: [magenta]{tokenizer.vocab_size}[/magenta]")
 
@@ -204,7 +197,10 @@ def main():
         n_layers=config.model.n_layers,
         d_ff=config.model.d_ff,
         dropout=config.model.dropout,
+        path_input_dim=config.model.path_input_dim,
+        predict_char=config.model.predict_char,
         predict_path=config.model.predict_path,
+        predict_length=config.model.predict_length,
         pad_token_id=tokenizer.pad_token_id,
         cls_token_id=tokenizer.cls_token_id,
         sep_token_id=tokenizer.sep_token_id,

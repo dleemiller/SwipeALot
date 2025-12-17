@@ -68,6 +68,7 @@ class SwipeTrainer(Trainer):
                     tokenizer=hf_tokenizer,
                     max_path_len=self.model.config.max_path_len,
                     max_char_len=self.model.config.max_char_len,
+                    path_input_dim=getattr(self.model.config, "path_input_dim", 6),
                 )
                 hf_processor.save_pretrained(output_dir)
         except Exception as e:
@@ -188,16 +189,16 @@ def create_compute_metrics_fn(tokenizer):
                 labels = torch.tensor(labels)
 
             # Extract character portion from sequence
-            # Sequence is: [CLS] + path + [SEP] + chars
-            # Calculate where chars start dynamically
-            total_seq_len = predictions.shape[1]
+            # Prefer new shape: [batch, char_len, vocab_size]. Fall back to legacy full-sequence
+            # logits: [batch, seq_len, vocab_size] with sequence [CLS] + path + [SEP] + chars.
             char_len = labels.shape[1]
-            # path_len = total_seq_len - 1 (CLS) - 1 (SEP) - char_len
-            path_len = total_seq_len - 2 - char_len
-            char_start = 1 + path_len + 1  # After [CLS] + path + [SEP]
-            char_logits = predictions[
-                :, char_start : char_start + char_len, :
-            ]  # [batch, char_len, vocab_size]
+            if predictions.shape[1] == char_len:
+                char_logits = predictions
+            else:
+                total_seq_len = predictions.shape[1]
+                path_len = total_seq_len - 2 - char_len
+                char_start = 1 + path_len + 1  # After [CLS] + path + [SEP]
+                char_logits = predictions[:, char_start : char_start + char_len, :]
 
             char_labels = labels
 

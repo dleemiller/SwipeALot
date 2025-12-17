@@ -79,8 +79,10 @@ class TestModels:
                 attention_mask=attention_mask,
             )
 
-        # Model outputs logits for entire sequence
-        assert outputs.char_logits.shape == (batch_size, seq_len, 100)
+        # Model outputs logits for text segment only
+        assert outputs.char_logits.shape == (batch_size, 20, 100)
+        # Hidden states are for the full mixed sequence: [CLS] + path + [SEP] + chars
+        assert outputs.last_hidden_state.shape == (batch_size, seq_len, config.d_model)
 
     def test_save_load_model(self):
         with tempfile.TemporaryDirectory() as tmpdir:

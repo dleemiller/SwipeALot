@@ -23,8 +23,6 @@ from datasets import load_dataset
 from sklearn.metrics import accuracy_score, confusion_matrix
 from tqdm import tqdm
 
-from swipealot.data.dataset import normalize_coordinates, sample_path_points
-
 
 def load_model_and_processor(model_path: Path):
     """Load HuggingFace model and processor."""
@@ -62,21 +60,12 @@ def test_embedding_similarity(model, processor, device, dataset_name: str, n_sam
     test_data = load_dataset(dataset_name, split=f"test[:{n_samples}]")
     print(f"  ✓ Loaded {len(test_data)} samples")
 
-    # Get max_path_len from processor
-    max_path_len = processor.max_path_len
-
     # Prepare test samples
     samples = []
     for item in test_data:
-        # Normalize and sample path coordinates
-        normalized = normalize_coordinates(
-            item["data"], item["canvas_width"], item["canvas_height"]
-        )
-        path_coords, path_mask = sample_path_points(normalized, max_path_len)
-
         samples.append(
             {
-                "path": path_coords,
+                "path": item["data"],
                 "word": item["word"],
                 "candidates": item.get("candidates", [item["word"]]),
             }
@@ -109,11 +98,8 @@ def test_embedding_similarity(model, processor, device, dataset_name: str, n_sam
             if word not in candidates:
                 candidates.insert(0, word)
 
-            # Compute embeddings for path and all candidates
-            path_tensor = torch.tensor([path], dtype=torch.float32)
-
-            # Get path embedding
-            path_input = processor(path_coords=path_tensor, text=None, return_tensors="pt")
+            # Get path embedding (path-only)
+            path_input = processor(path_coords=path, text=None, return_tensors="pt")
             path_input = {k: v.to(device) for k, v in path_input.items()}
             path_output = model(**path_input)
             path_embedding = path_output.pooler_output  # [1, d_model]
@@ -121,7 +107,7 @@ def test_embedding_similarity(model, processor, device, dataset_name: str, n_sam
             # Get candidate embeddings
             candidate_embeddings = []
             for candidate in candidates:
-                cand_input = processor(path_coords=path_tensor, text=candidate, return_tensors="pt")
+                cand_input = processor(path_coords=path, text=candidate, return_tensors="pt")
                 cand_input = {k: v.to(device) for k, v in cand_input.items()}
                 cand_output = model(**cand_input)
                 cand_embedding = cand_output.pooler_output  # [1, d_model]
@@ -211,9 +197,6 @@ def test_length_prediction(model, processor, device, dataset_name: str, n_sample
     test_data = load_dataset(dataset_name, split=f"test[:{n_samples}]")
     print(f"  ✓ Loaded {len(test_data)} samples")
 
-    # Get max_path_len from processor
-    max_path_len = processor.max_path_len
-
     # Prepare samples
     predicted_lengths = []
     true_lengths = []
@@ -221,19 +204,12 @@ def test_length_prediction(model, processor, device, dataset_name: str, n_sample
     print("\nPredicting word lengths...")
     with torch.no_grad():
         for item in tqdm(test_data, desc="Testing"):
-            # Normalize and sample path coordinates
-            normalized = normalize_coordinates(
-                item["data"], item["canvas_width"], item["canvas_height"]
-            )
-            path_coords, _ = sample_path_points(normalized, max_path_len)
-            path = torch.tensor([path_coords], dtype=torch.float32)
-
             word = item["word"]
             # Count only alphanumeric characters (matching training)
             true_length = sum(1 for c in word.lower() if c.isalpha() or c.isdigit())
 
             # Process input (path only, no text)
-            inputs = processor(path_coords=path, text=None, return_tensors="pt")
+            inputs = processor(path_coords=item["data"], text=None, return_tensors="pt")
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             # Get model output
@@ -353,9 +329,6 @@ def test_masked_prediction(model, processor, device, dataset_name: str, n_sample
     test_data = load_dataset(dataset_name, split=f"test[:{n_samples}]")
     print(f"  ✓ Loaded {len(test_data)} samples")
 
-    # Get max_path_len from processor
-    max_path_len = processor.max_path_len
-
     # Get tokenizer
     tokenizer = processor.tokenizer
     mask_token_id = tokenizer.mask_token_id
@@ -369,13 +342,6 @@ def test_masked_prediction(model, processor, device, dataset_name: str, n_sample
     print("\nTesting masked character prediction...")
     with torch.no_grad():
         for item in tqdm(test_data, desc="Testing"):
-            # Normalize and sample path coordinates
-            normalized = normalize_coordinates(
-                item["data"], item["canvas_width"], item["canvas_height"]
-            )
-            path_coords, _ = sample_path_points(normalized, max_path_len)
-            path = torch.tensor([path_coords], dtype=torch.float32)
-
             word = item["word"]
 
             # Skip very short words
@@ -383,7 +349,7 @@ def test_masked_prediction(model, processor, device, dataset_name: str, n_sample
                 continue
 
             # Process the full word first to get the proper sequence
-            inputs_original = processor(path_coords=path, text=word, return_tensors="pt")
+            inputs_original = processor(path_coords=item["data"], text=word, return_tensors="pt")
 
             # Get the character tokens
             char_ids = inputs_original["input_ids"][0].tolist()
@@ -421,12 +387,9 @@ def test_masked_prediction(model, processor, device, dataset_name: str, n_sample
                 print("  ✗ Model does not have character prediction capability")
                 return None
 
-            char_logits = outputs.char_logits  # [batch, seq_len, vocab_size]
-
-            # Character positions in the full sequence
-            # Sequence is: [CLS] + path + [SEP] + chars
-            path_len = inputs["path_coords"].shape[1]
-            char_start = 1 + path_len + 1  # After [CLS], path, and [SEP]
+            char_logits = outputs.char_logits
+            # New behavior: [batch, char_len, vocab_size]. Legacy: [batch, seq_len, vocab_size].
+            is_char_segment_only = char_logits.shape[1] == inputs_original["input_ids"].shape[1]
 
             # Extract predictions for masked positions
             # Only evaluate alphanumeric characters
@@ -439,9 +402,11 @@ def test_masked_prediction(model, processor, device, dataset_name: str, n_sample
                 if not _should_evaluate_char(true_char):
                     continue
 
-                # Adjust position to account for [CLS], path, [SEP]
-                full_seq_pos = char_start + pos
-                logits = char_logits[0, full_seq_pos]  # [vocab_size]
+                logits = (
+                    char_logits[0, pos]
+                    if is_char_segment_only
+                    else char_logits[0, (1 + inputs["path_coords"].shape[1] + 1 + pos)]
+                )
                 pred_id = logits.argmax().item()
                 pred_char = tokenizer._tokenizer.id_to_char.get(pred_id, "?")
 
@@ -532,9 +497,6 @@ def test_full_reconstruction(model, processor, device, dataset_name: str, n_samp
     test_data = load_dataset(dataset_name, split=f"test[:{n_samples}]")
     print(f"  ✓ Loaded {len(test_data)} samples")
 
-    # Get max_path_len from processor
-    max_path_len = processor.max_path_len
-
     # Get tokenizer
     tokenizer = processor.tokenizer
     mask_token_id = tokenizer.mask_token_id
@@ -547,13 +509,6 @@ def test_full_reconstruction(model, processor, device, dataset_name: str, n_samp
     print("\nTesting full reconstruction (all characters masked)...")
     with torch.no_grad():
         for item in tqdm(test_data, desc="Testing"):
-            # Normalize and sample path coordinates
-            normalized = normalize_coordinates(
-                item["data"], item["canvas_width"], item["canvas_height"]
-            )
-            path_coords, _ = sample_path_points(normalized, max_path_len)
-            path = torch.tensor([path_coords], dtype=torch.float32)
-
             word = item["word"]
 
             # Skip very short words
@@ -561,7 +516,7 @@ def test_full_reconstruction(model, processor, device, dataset_name: str, n_samp
                 continue
 
             # Process to get proper sequence
-            inputs_original = processor(path_coords=path, text=word, return_tensors="pt")
+            inputs_original = processor(path_coords=item["data"], text=word, return_tensors="pt")
             char_ids = inputs_original["input_ids"][0].tolist()
 
             # Mask ALL character tokens (matching ValidationCollator)
@@ -608,17 +563,17 @@ def test_full_reconstruction(model, processor, device, dataset_name: str, n_samp
                 print("  ✗ Model does not have character prediction capability")
                 return None
 
-            char_logits = outputs.char_logits  # [batch, seq_len, vocab_size]
-
-            # Character positions in the full sequence
-            path_len = inputs["path_coords"].shape[1]
-            char_start = 1 + path_len + 1  # After [CLS], path, and [SEP]
+            char_logits = outputs.char_logits
+            is_char_segment_only = char_logits.shape[1] == inputs_original["input_ids"].shape[1]
 
             # Evaluate all alphanumeric positions
             word_predictions = []
             for pos, true_id in zip(evaluable_positions, true_ids, strict=True):
-                full_seq_pos = char_start + pos
-                logits = char_logits[0, full_seq_pos]
+                logits = (
+                    char_logits[0, pos]
+                    if is_char_segment_only
+                    else char_logits[0, (1 + inputs["path_coords"].shape[1] + 1 + pos)]
+                )
                 pred_id = logits.argmax().item()
 
                 true_char = tokenizer._tokenizer.id_to_char.get(true_id, "?")
@@ -709,14 +664,11 @@ def test_path_reconstruction(model, processor, device, dataset_name: str, n_samp
 
     with torch.no_grad():
         for item in tqdm(test_data, desc="Testing"):
-            # Normalize and sample path coordinates
-            normalized = normalize_coordinates(
-                item["data"], item["canvas_width"], item["canvas_height"]
-            )
-            path_coords, path_mask = sample_path_points(normalized, max_path_len)
-            path = torch.tensor([path_coords], dtype=torch.float32)
-
             word = item["word"]
+            base_inputs = processor(path_coords=item["data"], text=word, return_tensors="pt")
+            path = base_inputs["path_coords"]  # [1, max_path_len, path_input_dim]
+            full_attention_mask = base_inputs["attention_mask"][0].cpu().numpy()
+            path_mask = full_attention_mask[1 : 1 + max_path_len].astype(int).tolist()
 
             # Create masked version of path
             masked_path = path.clone()
@@ -733,7 +685,8 @@ def test_path_reconstruction(model, processor, device, dataset_name: str, n_samp
                 continue
 
             # Process inputs with masked path
-            inputs = processor(path_coords=masked_path, text=word, return_tensors="pt")
+            inputs = base_inputs
+            inputs["path_coords"] = masked_path
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             # Get predictions
@@ -743,18 +696,17 @@ def test_path_reconstruction(model, processor, device, dataset_name: str, n_samp
                 print("  ✗ Model output does not have path_logits")
                 return None
 
-            path_logits = outputs.path_logits  # [batch, seq_len, 3]
-
-            # Extract path predictions (positions 1 to 1+path_len in sequence)
-            # Sequence is: [CLS] + path + [SEP] + chars
-            path_start = 1
-            path_predictions = path_logits[
-                0, path_start : path_start + max_path_len, :
-            ]  # [max_path_len, 3]
+            path_logits = outputs.path_logits
+            # New behavior: [batch, path_len, D]. Legacy: [batch, seq_len, D].
+            if path_logits.shape[1] == max_path_len:
+                path_predictions = path_logits[0]
+            else:
+                path_start = 1
+                path_predictions = path_logits[0, path_start : path_start + max_path_len, :]
 
             # Calculate MSE for masked points only
-            true_coords = path[0].cpu().numpy()  # [max_path_len, 3]
-            pred_coords = path_predictions.cpu().numpy()  # [max_path_len, 3]
+            true_coords = path[0].cpu().numpy()
+            pred_coords = path_predictions.cpu().numpy()
 
             # MSE over all valid points
             valid_indices = [i for i in range(max_path_len) if path_mask[i] == 1]

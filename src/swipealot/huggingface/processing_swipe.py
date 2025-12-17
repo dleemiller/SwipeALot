@@ -81,24 +81,43 @@ class SwipeProcessor(ProcessorMixin):
         if path_coords is not None:
             # Handle path coordinates
             if isinstance(path_coords, (list, tuple)):
-                # Check if it's a batch or single path
-                if len(path_coords) > 0 and isinstance(path_coords[0][0], (list, tuple)):
-                    # Batch of paths [[path1], [path2], ...]
-                    path_coords = torch.tensor(path_coords, dtype=torch.float32)
+                if len(path_coords) == 0:
+                    batch_size = 1
                 else:
-                    # Single path [[x,y,t], [x,y,t], ...]
-                    path_coords = torch.tensor([path_coords], dtype=torch.float32)
+                    first = path_coords[0]
+                    # Raw single path: [{"x","y","t"}, ...]
+                    if isinstance(first, dict):
+                        batch_size = 1
+                    # Raw batch of paths: [[{"x","y","t"}, ...], ...]
+                    elif (
+                        isinstance(first, (list, tuple))
+                        and len(first) > 0
+                        and isinstance(first[0], dict)
+                    ):
+                        batch_size = len(path_coords)
+                    # Numeric batch: [[[...], ...], ...] where points are lists/tuples
+                    elif (
+                        isinstance(first, (list, tuple))
+                        and len(first) > 0
+                        and isinstance(first[0], (list, tuple))
+                    ):
+                        path_coords = torch.tensor(path_coords, dtype=torch.float32)
+                        batch_size = path_coords.shape[0]
+                    else:
+                        # Numeric single path: [[...], [...], ...]
+                        path_coords = torch.tensor([path_coords], dtype=torch.float32)
+                        batch_size = path_coords.shape[0]
             elif isinstance(path_coords, np.ndarray):
                 path_coords = torch.from_numpy(path_coords).float()
                 if path_coords.dim() == 2:
                     # Single path, add batch dimension
                     path_coords = path_coords.unsqueeze(0)
+                batch_size = path_coords.shape[0]
             elif isinstance(path_coords, torch.Tensor):
                 if path_coords.dim() == 2:
                     # Single path, add batch dimension
                     path_coords = path_coords.unsqueeze(0)
-
-            batch_size = path_coords.shape[0]
+                batch_size = path_coords.shape[0]
         elif text is not None:
             if isinstance(text, str):
                 batch_size = 1
@@ -114,53 +133,60 @@ class SwipeProcessor(ProcessorMixin):
         if path_coords is not None:
             # Check if path_coords is raw data (list of dicts) or already a tensor
             if isinstance(path_coords, (list, tuple)) and len(path_coords) > 0:
-                # Check if it's raw path data (list of {"x", "y", "t"} dicts)
                 first_elem = path_coords[0]
-                if isinstance(first_elem, (list, tuple)) and len(first_elem) > 0:
-                    first_point = first_elem[0]
-                    if isinstance(first_point, dict) and "x" in first_point:
-                        # Raw path data - need to preprocess
-                        processed_paths = []
-                        path_masks = []
-                        for path in path_coords:
-                            # Compute motion features
-                            features = normalize_and_compute_features(path)
-                            # Spatially uniform resampling to max_path_len
-                            path_feats, mask = sample_path_points_with_features(
-                                features, self.max_path_len
-                            )
-                            processed_paths.append(path_feats)
-                            path_masks.append(mask)
 
-                        path_coords = np.stack(processed_paths)  # [batch, max_path_len, 6]
-                        _path_mask = np.stack(path_masks)  # [batch, max_path_len]
-
-                        # Convert to tensor if needed
-                        if return_tensors == "pt":
-                            path_coords = torch.from_numpy(path_coords).float()
-                            _path_mask = torch.from_numpy(_path_mask).long()
+                # Raw single path: [{"x","y","t"}, ...]
+                if isinstance(first_elem, dict) and "x" in first_elem:
+                    features = normalize_and_compute_features(path_coords)
+                    path_feats, mask = sample_path_points_with_features(features, self.max_path_len)
+                    if return_tensors == "pt":
+                        path_coords = torch.from_numpy(path_feats).float().unsqueeze(0)
+                        _path_mask = torch.from_numpy(mask).long().unsqueeze(0)
                     else:
-                        # Already numeric data, process as before
-                        path_coords = torch.tensor(path_coords, dtype=torch.float32)
-                        if path_coords.dim() == 2:
-                            path_coords = path_coords.unsqueeze(0)
+                        path_coords = np.expand_dims(path_feats, axis=0)
+                        _path_mask = np.expand_dims(mask, axis=0)
 
-                        current_path_len = path_coords.shape[1]
-                        if truncation and current_path_len > self.max_path_len:
-                            path_coords = path_coords[:, : self.max_path_len, :]
-                        if padding and current_path_len < self.max_path_len:
-                            pad_len = self.max_path_len - current_path_len
-                            pad_shape = (batch_size, pad_len, self.path_input_dim)
-                            path_coords = torch.cat([path_coords, torch.zeros(pad_shape)], dim=1)
+                # Raw batch of paths: [[{"x","y","t"}, ...], ...]
+                elif (
+                    isinstance(first_elem, (list, tuple))
+                    and len(first_elem) > 0
+                    and isinstance(first_elem[0], dict)
+                    and "x" in first_elem[0]
+                ):
+                    processed_paths = []
+                    path_masks = []
+                    for path in path_coords:
+                        features = normalize_and_compute_features(path)
+                        path_feats, mask = sample_path_points_with_features(
+                            features, self.max_path_len
+                        )
+                        processed_paths.append(path_feats)
+                        path_masks.append(mask)
 
-                        # Create mask
-                        _path_mask = torch.ones(batch_size, self.max_path_len, dtype=torch.long)
-                        is_padding = (path_coords == 0).all(dim=-1)
-                        _path_mask[is_padding] = 0
+                    path_coords = np.stack(processed_paths)  # [batch, max_path_len, 6]
+                    _path_mask = np.stack(path_masks)  # [batch, max_path_len]
+
+                    if return_tensors == "pt":
+                        path_coords = torch.from_numpy(path_coords).float()
+                        _path_mask = torch.from_numpy(_path_mask).long()
+
                 else:
-                    # Single path, wrap in batch
-                    path_coords = torch.tensor([path_coords], dtype=torch.float32)
-                    _path_mask = torch.ones(1, self.max_path_len, dtype=torch.long)
+                    # Numeric list input; process as before
+                    path_coords = torch.tensor(path_coords, dtype=torch.float32)
+                    if path_coords.dim() == 2:
+                        path_coords = path_coords.unsqueeze(0)
+
+                    current_path_len = path_coords.shape[1]
+                    if truncation and current_path_len > self.max_path_len:
+                        path_coords = path_coords[:, : self.max_path_len, :]
+                    if padding and current_path_len < self.max_path_len:
+                        pad_len = self.max_path_len - current_path_len
+                        pad_shape = (batch_size, pad_len, self.path_input_dim)
+                        path_coords = torch.cat([path_coords, torch.zeros(pad_shape)], dim=1)
+
+                    _path_mask = torch.ones(batch_size, self.max_path_len, dtype=torch.long)
+                    is_padding = (path_coords == 0).all(dim=-1)
+                    _path_mask[is_padding] = 0
             elif isinstance(path_coords, np.ndarray):
                 path_coords = torch.from_numpy(path_coords).float()
                 if path_coords.dim() == 2:

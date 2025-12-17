@@ -152,6 +152,21 @@ def test_processor_attention_when_text_missing():
     )
 
 
+def test_processor_accepts_raw_dict_paths():
+    tokenizer = CharacterTokenizer()
+    processor = SwipeProcessor(tokenizer=tokenizer, max_path_len=4, max_char_len=6)
+
+    raw_path = [{"x": 0.1, "y": 0.2, "t": 1000.0}, {"x": 0.2, "y": 0.3, "t": 1010.0}]
+    inputs = processor(path_coords=raw_path, text=None, return_tensors="pt")
+
+    assert inputs["path_coords"].shape == (1, processor.max_path_len, 6)
+    assert inputs["input_ids"].shape == (1, processor.max_char_len)
+    assert (
+        inputs["attention_mask"].shape[1] == 1 + processor.max_path_len + 1 + processor.max_char_len
+    )
+    assert torch.all(inputs["attention_mask"][0, -(processor.max_char_len) :] == 0)
+
+
 def test_pairwise_collator_zero_attention_prob():
     tokenizer = CharacterTokenizer()
     sample = _sample(tokenizer, "modal", path_len=3, char_len=5)
