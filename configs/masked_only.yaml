@@ -7,6 +7,7 @@ model:
   vocab_size: 100  # will be set from tokenizer
   max_path_len: 128
   max_char_len: 48
+  path_input_dim: 6  # (x, y, dx, dy, ds, log_dt)
   predict_path: false      # Disable path prediction head
   predict_length: false    # Disable length prediction head
 
@@ -24,41 +25,50 @@ data:
   num_workers: 4
 
 training:
-  learning_rate: 0.00002         # Lower LR for fine-tuning (2e-5)
-  min_learning_rate: 0.000002    # 10% of learning rate (2e-6)
-  weight_decay: 0.01
-  num_epochs: 10                 # Fewer epochs for fine-tuning
-  warmup_steps: 500              # Shorter warmup for fine-tuning
-
-  # Loss weights - ONLY character MLM
-  char_loss_weight: 1.0          # ONLY enabled objective
-  path_loss_weight: 0.0          # DISABLED
-  length_loss_weight: 0.0        # DISABLED
-  contrastive_weight: 0.0        # DISABLED
-
-  log_interval: 100
-  val_interval: 1000
-  save_interval: 1
-  keep_n_checkpoints: 2
-  log_dir: "logs"
-  checkpoint_dir: "checkpoints"
-  device: "cuda"
-  use_amp: true
-  amp_dtype: "bfloat16"
-
-  # Character loss configuration (keep existing)
+  # Custom SwipeALot parameters - ONLY character MLM
+  char_loss_weight: 1.0
+  path_loss_weight: 0.0
+  length_loss_weight: 0.0
   use_focal_loss: true
   focal_gamma: 2.0
   use_char_freq_weights: true
   char_weights_path: "checkpoints/char_weights.pt"
-
-  # Disable contrastive learning
-  use_pairwise_masking: false    # Use standard MaskedCollator
+  use_pairwise_masking: false
   pairwise_modality_prob: 0.0
+  pairwise_zero_attention_prob: 0.5
+  contrastive_weight: 0.0
+  contrastive_temperature: 0.1
   matryoshka_dims: null
   matryoshka_weights: null
 
+  # Standard HuggingFace TrainingArguments
   training_args:
+    output_dir: "checkpoints"
+    num_train_epochs: 10
     per_device_train_batch_size: 512
     per_device_eval_batch_size: 512
+    gradient_accumulation_steps: 1
+    learning_rate: 0.00002
+    weight_decay: 0.01
+    warmup_steps: 500
     lr_scheduler_type: "cosine"
+    logging_dir: "logs"
+    logging_steps: 100
+    logging_strategy: "steps"
+    eval_strategy: "steps"
+    eval_steps: 1000
+    save_steps: 1000
+    save_total_limit: 2
+    load_best_model_at_end: true
+    metric_for_best_model: "char_accuracy"
+    greater_is_better: true
+    bf16: true
+    fp16: false
+    remove_unused_columns: false
+    report_to: ["tensorboard"]
+    dataloader_num_workers: 4
+    dataloader_pin_memory: true
+    max_grad_norm: 1.0
+    save_strategy: "steps"
+    save_safetensors: true
+    prediction_loss_only: false
