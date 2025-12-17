@@ -12,7 +12,7 @@ def _sample(tokenizer: CharacterTokenizer, word: str, path_len: int, char_len: i
     token_ids = token_ids + [tokenizer.pad_token_id] * (char_len - len(token_ids))
     char_mask = torch.tensor([1 if t != tokenizer.pad_token_id else 0 for t in token_ids], dtype=torch.long)
     return {
-        "path_coords": torch.randn(path_len, 3),
+        "path_coords": torch.randn(path_len, 6),
         "path_mask": torch.ones(path_len, dtype=torch.long),
         "char_tokens": torch.tensor(token_ids, dtype=torch.long),
         "char_mask": char_mask,
@@ -43,7 +43,7 @@ def test_masked_collator_attention_and_labels():
     assert torch.all(batch["attention_mask"][:, -7:] == batch["char_mask"])
 
     # Path masking outputs exist and align in shape
-    assert batch["path_labels"].shape == (2, 5, 3)
+    assert batch["path_labels"].shape == (2, 5, 6)
     assert batch["path_mask_indices"].shape == (2, 5)
 
     # Character labels should ignore padding
@@ -166,3 +166,22 @@ def test_pairwise_collator_zero_attention_prob():
     assert path_segment.sum() == 0
     # text attended
     assert attn_b[-5:].sum() == 5
+
+
+def test_pairwise_collator_accepts_custom_inverted_probs():
+    tokenizer = CharacterTokenizer()
+    custom_collator = PairwiseMaskedCollator(
+        tokenizer=tokenizer,
+        mask_path=True,
+        modality_prob=0.0,
+        zero_attention_prob=0.0,
+        inverted_char_prob_heavy=0.9,
+        inverted_path_prob_heavy=0.8,
+        inverted_char_prob_light=0.3,
+        inverted_path_prob_light=0.25,
+    )
+
+    assert custom_collator.pairwise_inverted_char_prob_heavy == 0.9
+    assert custom_collator.pairwise_inverted_path_prob_heavy == 0.8
+    assert custom_collator.pairwise_inverted_char_prob_light == 0.3
+    assert custom_collator.pairwise_inverted_path_prob_light == 0.25

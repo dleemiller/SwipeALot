@@ -24,6 +24,9 @@ class ModelConfig:
     max_path_len: int = 64
     max_char_len: int = 38
 
+    # Path features
+    path_input_dim: int = 6  # (x, y, dx, dy, ds, log_dt)
+
     # Tasks
     predict_path: bool = True
     predict_char: bool = True  # Core MLM objective (can be disabled with char_loss_weight=0)

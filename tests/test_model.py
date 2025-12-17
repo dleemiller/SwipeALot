@@ -28,7 +28,7 @@ def test_model():
 
     # Create dummy inputs
     batch_size = 2
-    path_coords = torch.randn(batch_size, config.max_path_len, 3)
+    path_coords = torch.randn(batch_size, config.max_path_len, config.path_input_dim)
     input_ids = torch.randint(0, config.vocab_size, (batch_size, config.max_char_len))
     attention_mask = torch.ones(
         batch_size, 1 + config.max_path_len + 1 + config.max_char_len
@@ -56,7 +56,9 @@ def test_model():
         "path_coords": path_coords,
         "input_ids": input_ids,
         "char_labels": char_labels,
-        "path_labels": torch.randn(batch_size, config.max_path_len, 3).clamp(0, 1),  # [0, 1] range
+        "path_labels": torch.randn(batch_size, config.max_path_len, config.path_input_dim).clamp(
+            0, 1
+        ),  # [0, 1] range
         "path_mask_indices": torch.randint(0, 2, (batch_size, config.max_path_len)),
     }
     losses = loss_fn(outputs, batch)

@@ -25,7 +25,10 @@ from swipealot.analysis import (
     extract_special_token_to_path_attention,
 )
 from swipealot.data import SwipeDataset
-from swipealot.data.dataset import normalize_coordinates, sample_path_points
+from swipealot.data.preprocessing import (
+    normalize_and_compute_features,
+    sample_path_points_with_features,
+)
 from swipealot.models import SwipeTransformerModel
 
 
@@ -193,9 +196,10 @@ Examples:
     path_data = example["data"]
     print(f"   Path length: {len(path_data)} points")
 
-    # Normalize and sample path
-    normalized_path = normalize_coordinates(path_data, canvas_width=1.0, canvas_height=1.0)
-    path_coords, path_mask = sample_path_points(normalized_path, config.data.max_path_len)
+    processed_path = normalize_and_compute_features(path_data)
+    path_coords, path_mask = sample_path_points_with_features(
+        processed_path, config.data.max_path_len
+    )
 
     # Tokenize word
     char_tokens = tokenizer.encode(word) + [tokenizer.eos_token_id]

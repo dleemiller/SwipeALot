@@ -96,6 +96,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
             max_char_len=config.max_char_len,
             d_model=config.d_model,
             dropout=config.dropout,
+            path_input_dim=config.path_input_dim,
         )
 
         # Transformer encoder
@@ -151,7 +152,8 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         Args:
             input_ids (torch.Tensor): Character token IDs [batch, char_len]
-            path_coords (torch.Tensor): Path coordinates [batch, path_len, 3]
+            path_coords (torch.Tensor): Path features [batch, path_len, path_input_dim]
+                                       Default: [batch, path_len, 6] for (x, y, dx, dy, ds, log_dt)
             attention_mask (torch.Tensor, optional): Attention mask [batch, seq_len]
             labels (torch.Tensor or dict, optional): Labels for loss calculation
                 Can be tensor [batch, char_len] or dict with keys like char_labels, path_labels
@@ -302,6 +304,7 @@ class SwipeModel(SwipeTransformerPreTrainedModel):
             max_char_len=config.max_char_len,
             d_model=config.d_model,
             dropout=config.dropout,
+            path_input_dim=config.path_input_dim,
         )
 
         # Transformer encoder
@@ -335,7 +338,8 @@ class SwipeModel(SwipeTransformerPreTrainedModel):
         Forward pass that returns embeddings.
 
         Args:
-            path_coords (torch.Tensor): Path coordinates [batch, path_len, 3]
+            path_coords (torch.Tensor): Path features [batch, path_len, path_input_dim]
+                                       Default: [batch, path_len, 6] for (x, y, dx, dy, ds, log_dt)
             input_ids (torch.Tensor): Character token IDs [batch, char_len]
             attention_mask (torch.Tensor, optional): Attention mask [batch, seq_len]
             return_dict (bool, optional): Whether to return ModelOutput object

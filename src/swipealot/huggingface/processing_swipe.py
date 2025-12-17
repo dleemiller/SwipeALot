@@ -4,6 +4,11 @@ import numpy as np
 import torch
 from transformers import ProcessorMixin
 
+from ..data.preprocessing import (
+    normalize_and_compute_features,
+    sample_path_points_with_features,
+)
+
 
 class SwipeProcessor(ProcessorMixin):
     """
@@ -21,10 +26,17 @@ class SwipeProcessor(ProcessorMixin):
     attributes = ["tokenizer"]
     tokenizer_class = "AutoTokenizer"  # Will use auto_map from tokenizer_config.json
 
-    def __init__(self, tokenizer=None, max_path_len: int = 64, max_char_len: int = 38):
+    def __init__(
+        self,
+        tokenizer=None,
+        max_path_len: int = 64,
+        max_char_len: int = 38,
+        path_input_dim: int = 6,
+    ):
         self.tokenizer = tokenizer
         self.max_path_len = max_path_len
         self.max_char_len = max_char_len
+        self.path_input_dim = path_input_dim
         # Attributes expected by newer transformers (not used for swipe models)
         self.chat_template = None
         self.audio_tokenizer = None
@@ -45,8 +57,9 @@ class SwipeProcessor(ProcessorMixin):
         Process path coordinates and text into model inputs.
 
         Args:
-            path_coords: List of paths or tensor [batch, path_len, 3]
-                        Each point is (x, y, time). Can be None if only processing text.
+            path_coords: List of paths (raw {"x", "y", "t"} dicts) or tensor [batch, path_len, path_input_dim].
+                        Raw paths will be preprocessed to compute motion features.
+                        Can be None if only processing text.
             text: String or list of strings to encode. Can be None if only processing paths.
             padding: Whether to pad sequences. Can be True/False or "max_length"
             truncation: Whether to truncate sequences
@@ -56,7 +69,8 @@ class SwipeProcessor(ProcessorMixin):
 
         Returns:
             Dictionary with:
-                - path_coords: [batch, max_path_len, 3] (if path_coords provided)
+                - path_coords: [batch, max_path_len, path_input_dim] (if path_coords provided)
+                  Default: [batch, max_path_len, 6] for (x, y, dx, dy, ds, log_dt)
                 - input_ids: [batch, max_char_len] (if text provided)
                 - attention_mask: [batch, total_seq_len]
         """
@@ -98,31 +112,103 @@ class SwipeProcessor(ProcessorMixin):
 
         # Process path coordinates
         if path_coords is not None:
-            current_path_len = path_coords.shape[1]
+            # Check if path_coords is raw data (list of dicts) or already a tensor
+            if isinstance(path_coords, (list, tuple)) and len(path_coords) > 0:
+                # Check if it's raw path data (list of {"x", "y", "t"} dicts)
+                first_elem = path_coords[0]
+                if isinstance(first_elem, (list, tuple)) and len(first_elem) > 0:
+                    first_point = first_elem[0]
+                    if isinstance(first_point, dict) and "x" in first_point:
+                        # Raw path data - need to preprocess
+                        processed_paths = []
+                        path_masks = []
+                        for path in path_coords:
+                            # Compute motion features
+                            features = normalize_and_compute_features(path)
+                            # Spatially uniform resampling to max_path_len
+                            path_feats, mask = sample_path_points_with_features(
+                                features, self.max_path_len
+                            )
+                            processed_paths.append(path_feats)
+                            path_masks.append(mask)
 
-            # Truncate if needed
-            if truncation and current_path_len > self.max_path_len:
-                path_coords = path_coords[:, : self.max_path_len, :]
-                current_path_len = self.max_path_len
+                        path_coords = np.stack(processed_paths)  # [batch, max_path_len, 6]
+                        _path_mask = np.stack(path_masks)  # [batch, max_path_len]
 
-            # Pad if needed
-            if padding and current_path_len < self.max_path_len:
-                pad_len = self.max_path_len - current_path_len
-                path_coords = torch.cat([path_coords, torch.zeros(batch_size, pad_len, 3)], dim=1)
+                        # Convert to tensor if needed
+                        if return_tensors == "pt":
+                            path_coords = torch.from_numpy(path_coords).float()
+                            _path_mask = torch.from_numpy(_path_mask).long()
+                    else:
+                        # Already numeric data, process as before
+                        path_coords = torch.tensor(path_coords, dtype=torch.float32)
+                        if path_coords.dim() == 2:
+                            path_coords = path_coords.unsqueeze(0)
 
-            # Create path mask (1 = real data, 0 = padding)
-            # Detect padding by checking for all-zero coordinates
-            path_mask = torch.ones(batch_size, self.max_path_len, dtype=torch.long)
-            # A point is padding if all its coordinates (x, y, t) are zero
-            is_padding = (path_coords == 0).all(dim=-1)  # [batch, path_len]
-            path_mask[is_padding] = 0
+                        current_path_len = path_coords.shape[1]
+                        if truncation and current_path_len > self.max_path_len:
+                            path_coords = path_coords[:, : self.max_path_len, :]
+                        if padding and current_path_len < self.max_path_len:
+                            pad_len = self.max_path_len - current_path_len
+                            pad_shape = (batch_size, pad_len, self.path_input_dim)
+                            path_coords = torch.cat([path_coords, torch.zeros(pad_shape)], dim=1)
+
+                        # Create mask
+                        _path_mask = torch.ones(batch_size, self.max_path_len, dtype=torch.long)
+                        is_padding = (path_coords == 0).all(dim=-1)
+                        _path_mask[is_padding] = 0
+                else:
+                    # Single path, wrap in batch
+                    path_coords = torch.tensor([path_coords], dtype=torch.float32)
+                    _path_mask = torch.ones(1, self.max_path_len, dtype=torch.long)
+            elif isinstance(path_coords, np.ndarray):
+                path_coords = torch.from_numpy(path_coords).float()
+                if path_coords.dim() == 2:
+                    path_coords = path_coords.unsqueeze(0)
+                # If user provided raw (x,y,t) triples but model expects engineered features,
+                # convert to motion features and resample.
+                if path_coords.shape[-1] == 3 and self.path_input_dim == 6:
+                    processed_paths = []
+                    path_masks = []
+                    for path in path_coords.cpu().numpy():
+                        raw = [{"x": float(p[0]), "y": float(p[1]), "t": float(p[2])} for p in path]
+                        features = normalize_and_compute_features(raw)
+                        path_feats, mask = sample_path_points_with_features(features, self.max_path_len)
+                        processed_paths.append(path_feats)
+                        path_masks.append(mask)
+
+                    path_coords = torch.from_numpy(np.stack(processed_paths)).float()
+                    _path_mask = torch.from_numpy(np.stack(path_masks)).long()
+                else:
+                    _path_mask = torch.ones(
+                        path_coords.shape[0], self.max_path_len, dtype=torch.long
+                    )
+            elif isinstance(path_coords, torch.Tensor):
+                if path_coords.dim() == 2:
+                    path_coords = path_coords.unsqueeze(0)
+                # If user provided raw (x,y,t) triples but model expects engineered features,
+                # convert to motion features and resample.
+                if path_coords.shape[-1] == 3 and self.path_input_dim == 6:
+                    processed_paths = []
+                    path_masks = []
+                    for path in path_coords.detach().cpu().numpy():
+                        raw = [{"x": float(p[0]), "y": float(p[1]), "t": float(p[2])} for p in path]
+                        features = normalize_and_compute_features(raw)
+                        path_feats, mask = sample_path_points_with_features(features, self.max_path_len)
+                        processed_paths.append(path_feats)
+                        path_masks.append(mask)
+
+                    path_coords = torch.from_numpy(np.stack(processed_paths)).float()
+                    _path_mask = torch.from_numpy(np.stack(path_masks)).long()
+                else:
+                    _path_mask = torch.ones(
+                        path_coords.shape[0], self.max_path_len, dtype=torch.long
+                    )
 
             result["path_coords"] = path_coords
-            # Store path_mask internally for attention_mask construction
-            _path_mask = path_mask
         else:
             # No path coords provided, create empty/zero tensors
-            path_coords = torch.zeros(batch_size, self.max_path_len, 3)
+            path_coords = torch.zeros(batch_size, self.max_path_len, self.path_input_dim)
             _path_mask = torch.zeros(batch_size, self.max_path_len, dtype=torch.long)
             result["path_coords"] = path_coords
 
@@ -264,107 +350,8 @@ class SwipeProcessor(ProcessorMixin):
         """
         return self.tokenizer.decode(token_ids, **kwargs)
 
-    def normalize_coordinates(
-        self, data_points: list[dict], canvas_width: float = None, canvas_height: float = None
-    ) -> list[dict]:
-        """
-        Normalize swipe coordinates and timestamps.
-
-        Args:
-            data_points: List of dicts with 'x', 'y', 't' keys
-            canvas_width: Canvas width (not used - kept for compatibility)
-            canvas_height: Canvas height (not used - kept for compatibility)
-
-        Returns:
-            List of normalized coordinate dicts with x, y in [0,1] and t in [0,1]
-
-        Note:
-            For futo-org/swipe.futo.org dataset, x and y are already normalized to [0,1].
-            This function clamps them to ensure they stay in bounds and normalizes timestamps.
-        """
-        if not data_points:
-            return []
-
-        # Extract timestamps for normalization
-        timestamps = [p["t"] for p in data_points]
-        t_min = min(timestamps)
-        t_max = max(timestamps)
-        t_range = t_max - t_min if t_max > t_min else 1.0
-
-        normalized = []
-        for point in data_points:
-            # x and y are already normalized to [0,1] in the dataset
-            # But sometimes they go slightly outside bounds, so clamp them
-            x_norm = max(0.0, min(1.0, point["x"]))
-            y_norm = max(0.0, min(1.0, point["y"]))
-
-            # Normalize timestamp to [0, 1]
-            t_norm = (point["t"] - t_min) / t_range
-
-            normalized.append({"x": x_norm, "y": y_norm, "t": t_norm})
-
-        return normalized
-
-    def sample_path_points(self, data_points: list[dict], max_len: int = None) -> tuple:
-        """
-        Sample or pad path points to fixed length using linear interpolation.
-
-        Args:
-            data_points: List of coordinate dicts with 'x', 'y', 't' keys
-            max_len: Target length (defaults to self.max_path_len if not specified)
-
-        Returns:
-            Tuple of (sampled_points, mask) where:
-            - sampled_points: numpy array of shape [max_len, 3] with (x, y, t) coordinates
-            - mask: numpy array of shape [max_len] indicating valid (1) vs padding (0) points
-
-        Note:
-            - If path has fewer points than max_len, it's zero-padded
-            - If path has more points than max_len, it's downsampled using linear interpolation
-            - If path has exactly max_len points, it's returned as-is
-        """
-        if max_len is None:
-            max_len = self.max_path_len
-
-        num_points = len(data_points)
-
-        if num_points == max_len:
-            points = data_points
-            mask = [1] * max_len
-        elif num_points < max_len:
-            # Pad with zeros
-            points = data_points + [{"x": 0.0, "y": 0.0, "t": 0.0}] * (max_len - num_points)
-            mask = [1] * num_points + [0] * (max_len - num_points)
-        else:
-            # Downsample using linear interpolation
-            # Extract coordinates as arrays
-            x_coords = np.array([p["x"] for p in data_points])
-            y_coords = np.array([p["y"] for p in data_points])
-            t_coords = np.array([p["t"] for p in data_points])
-
-            # Original indices (parameter for interpolation)
-            original_indices = np.arange(num_points)
-
-            # Target indices for interpolation (evenly spaced)
-            target_indices = np.linspace(0, num_points - 1, max_len)
-
-            # Interpolate each coordinate independently
-            x_interp = np.interp(target_indices, original_indices, x_coords)
-            y_interp = np.interp(target_indices, original_indices, y_coords)
-            t_interp = np.interp(target_indices, original_indices, t_coords)
-
-            # Reconstruct points
-            points = [
-                {"x": float(x), "y": float(y), "t": float(t)}
-                for x, y, t in zip(x_interp, y_interp, t_interp, strict=True)
-            ]
-            mask = [1] * max_len
-
-        # Convert to numpy arrays
-        coords = np.array([[p["x"], p["y"], p["t"]] for p in points], dtype=np.float32)
-        mask = np.array(mask, dtype=np.int64)
-
-        return coords, mask
+    # Preprocessing methods are now imported from shared preprocessing module
+    # See src/swipealot/data/preprocessing.py for the implementation
 
     def save_pretrained(
         self,

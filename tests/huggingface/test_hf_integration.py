@@ -65,7 +65,7 @@ class TestModels:
 
         # Create dummy inputs
         batch_size = 2
-        path_coords = torch.randn(batch_size, 32, 3)
+        path_coords = torch.randn(batch_size, 32, config.path_input_dim)
         input_ids = torch.randint(0, 100, (batch_size, 20))
         # Sequence: [CLS] + path_tokens + [SEP] + char_tokens
         seq_len = 1 + 32 + 1 + 20  # = 54
@@ -148,7 +148,7 @@ class TestProcessor:
         assert "path_coords" in inputs
         assert "input_ids" in inputs
         assert "attention_mask" in inputs
-        assert inputs["path_coords"].shape[-1] == 3
+        assert inputs["path_coords"].shape[-1] == 6
         # Check attention mask has correct length: [CLS] + path + [SEP] + chars
         assert inputs["attention_mask"].shape[1] == 1 + 32 + 1 + 20
 
@@ -238,7 +238,7 @@ class TestIntegration:
             processor = SwipeProcessor(tokenizer=tokenizer, max_path_len=32, max_char_len=20)
 
             # Create inputs
-            path_coords = torch.randn(2, 32, 3)
+            path_coords = torch.randn(2, 32, config.path_input_dim)
             text = ["hello", "world"]
             inputs = processor(path_coords, text, return_tensors="pt")
 

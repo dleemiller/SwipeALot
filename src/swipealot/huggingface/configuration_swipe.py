@@ -20,6 +20,7 @@ class SwipeTransformerConfig(PretrainedConfig):
         vocab_size (int, optional): Size of vocabulary. Defaults to 100.
         max_path_len (int, optional): Maximum path sequence length. Defaults to 64.
         max_char_len (int, optional): Maximum character sequence length. Defaults to 38.
+        path_input_dim (int, optional): Path feature dimension. Defaults to 6 for (x, y, dx, dy, ds, log_dt).
         predict_path (bool, optional): Whether to predict path coordinates. Defaults to True.
         pad_token_id (int, optional): Padding token ID. Defaults to 0.
         cls_token_id (int, optional): CLS token ID. Defaults to 1.
@@ -41,6 +42,7 @@ class SwipeTransformerConfig(PretrainedConfig):
         vocab_size: int = 100,
         max_path_len: int = 64,
         max_char_len: int = 38,
+        path_input_dim: int = 6,
         predict_char: bool = True,
         predict_path: bool = True,
         predict_length: bool = True,
@@ -65,6 +67,7 @@ class SwipeTransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.max_path_len = max_path_len
         self.max_char_len = max_char_len
+        self.path_input_dim = path_input_dim
 
         # Model capabilities
         self.predict_char = predict_char
