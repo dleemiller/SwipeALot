@@ -10,6 +10,7 @@ model:
   path_input_dim: 6  # (x, y, dx, dy, ds, log_dt)
   predict_path: true
   predict_length: true
+  predict_char: true
 
 data:
   dataset_name: "futo-org/swipe.futo.org"
@@ -57,7 +58,7 @@ training:
     warmup_steps: 3600
     lr_scheduler_type: "cosine"
     logging_dir: "logs"
-    logging_steps: 100
+    logging_steps: 10
     logging_strategy: "steps"
     eval_strategy: "steps"
     eval_steps: 1000

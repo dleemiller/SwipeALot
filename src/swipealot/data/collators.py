@@ -8,6 +8,184 @@ import torch
 from .tokenizer import CharacterTokenizer
 
 
+def _swipable_length(word: str, max_len: int) -> int:
+    length = sum(1 for c in word.lower() if c.isalpha() or c.isdigit())
+    return min(length, max_len)
+
+
+def _mask_contiguous_blocks_1d(
+    valid_mask: torch.Tensor,
+    n_to_mask: int,
+    max_block_len: int,
+    rng: random.Random,
+) -> torch.Tensor:
+    """
+    Create a 1D binary mask (1=masked) consisting of contiguous blocks within valid segments.
+
+    Args:
+        valid_mask: [seq_len] tensor with 1 for valid points, 0 for padding/invalid.
+        n_to_mask: Target number of positions to mask (clipped to number of valid points).
+        max_block_len: Absolute maximum length for any single contiguous masked block.
+        rng: Random generator to sample block sizes and locations.
+
+    Returns:
+        mask_indices: [seq_len] long tensor with 1 at masked positions.
+    """
+    seq_len = int(valid_mask.shape[0])
+    valid_mask = valid_mask.to(dtype=torch.long)
+    n_valid = int(valid_mask.sum().item())
+    n_to_mask = max(0, min(int(n_to_mask), n_valid))
+
+    mask_indices = torch.zeros(seq_len, dtype=torch.long)
+    if n_to_mask == 0 or n_valid == 0:
+        return mask_indices
+    max_block_len = max(1, int(max_block_len))
+
+    # Find contiguous valid segments (runs of 1s).
+    segments: list[tuple[int, int]] = []
+    in_seg = False
+    seg_start = 0
+    for i, v in enumerate(valid_mask.tolist()):
+        if v == 1 and not in_seg:
+            seg_start = i
+            in_seg = True
+        elif v == 0 and in_seg:
+            segments.append((seg_start, i))  # end exclusive
+            in_seg = False
+    if in_seg:
+        segments.append((seg_start, seq_len))
+
+    masked = torch.zeros(seq_len, dtype=torch.bool)
+    remaining = n_to_mask
+
+    def _segment_available(s: int, e: int) -> int:
+        return int((~masked[s:e]).sum().item())
+
+    def _left_run(start: int) -> int:
+        run = 0
+        i = start - 1
+        while i >= 0 and valid_mask[i].item() == 1 and masked[i].item():
+            run += 1
+            i -= 1
+        return run
+
+    def _right_run(end: int) -> int:
+        run = 0
+        i = end
+        while i < seq_len and valid_mask[i].item() == 1 and masked[i].item():
+            run += 1
+            i += 1
+        return run
+
+    # Sample blocks until we reach the target number of masked positions.
+    # Prefer larger blocks by sampling block_len uniformly from [min_len, max_len].
+    attempts = 0
+    max_attempts = 50 * (n_to_mask + 1)
+    while remaining > 0 and attempts < max_attempts:
+        # Choose a segment weighted by available unmasked capacity.
+        candidates: list[tuple[int, int, int]] = []
+        total_avail = 0
+        for s, e in segments:
+            avail = _segment_available(s, e)
+            if avail > 0:
+                candidates.append((s, e, avail))
+                total_avail += avail
+
+        if total_avail == 0:
+            break
+
+        pick = rng.randrange(total_avail)
+        chosen_s = chosen_e = 0
+        chosen_avail = 0
+        acc = 0
+        for s, e, avail in candidates:
+            acc += avail
+            if pick < acc:
+                chosen_s, chosen_e, chosen_avail = s, e, avail
+                break
+
+        max_len = min(remaining, chosen_avail, max_block_len)
+        if max_len <= 0:
+            attempts += 1
+            continue
+
+        min_len = 2 if max_len >= 2 else 1
+        block_len = rng.randint(min_len, max_len)
+
+        placed = False
+        for _ in range(6):
+            # Find all valid start positions for a contiguous unmasked block of length block_len
+            # that would not create a run longer than max_block_len.
+            start_candidates: list[int] = []
+            for start in range(chosen_s, chosen_e - block_len + 1):
+                end = start + block_len
+                if masked[start:end].any():
+                    continue
+                run_len = _left_run(start) + block_len + _right_run(end)
+                if run_len <= max_block_len:
+                    start_candidates.append(start)
+
+            if start_candidates:
+                start = rng.choice(start_candidates)
+                masked[start : start + block_len] = True
+                remaining -= block_len
+                placed = True
+                break
+
+            # Try a smaller block length.
+            if block_len <= min_len:
+                break
+            block_len = max(min_len, block_len // 2)
+
+        if not placed:
+            # Fallback: mask a single random available position in the chosen segment,
+            # but still respect the max_block_len cap.
+            avail_positions = (~masked[chosen_s:chosen_e]).nonzero(as_tuple=True)[0]
+            if avail_positions.numel() > 0:
+                perm = avail_positions[torch.randperm(avail_positions.numel())]
+                for rel in perm.tolist():
+                    pos = chosen_s + int(rel)
+                    if _left_run(pos) + 1 + _right_run(pos + 1) <= max_block_len:
+                        masked[pos] = True
+                        remaining -= 1
+                        break
+
+        attempts += 1
+
+    # If we couldn't place enough contiguous blocks, fill remaining masks uniformly over valid positions.
+    if remaining > 0:
+        avail_positions = ((valid_mask == 1) & (~masked)).nonzero(as_tuple=True)[0]
+        if avail_positions.numel() > 0:
+            perm = avail_positions[torch.randperm(avail_positions.numel())]
+
+            def _max_run_with(pos: int) -> int:
+                # Compute max contiguous run length if we set masked[pos]=True.
+                tmp = masked.clone()
+                tmp[pos] = True
+                # Evaluate only within valid_mask
+                m = (tmp & (valid_mask == 1)).to(torch.int64)
+                max_run = 0
+                cur = 0
+                for v in m.tolist():
+                    if v == 1:
+                        cur += 1
+                        if cur > max_run:
+                            max_run = cur
+                    else:
+                        cur = 0
+                return max_run
+
+            for p in perm.tolist():
+                if remaining <= 0:
+                    break
+                if _max_run_with(int(p)) <= max_block_len:
+                    masked[int(p)] = True
+                    remaining -= 1
+
+    mask_indices[masked] = 1
+    return mask_indices
+
+
 class MaskedCollator:
     """
     Collator that creates masked versions of characters and paths for MLM-style training.
@@ -20,6 +198,7 @@ class MaskedCollator:
         path_mask_prob: float = 0.15,
         mask_path: bool = True,
         mask_vocab_only: bool = False,
+        path_mask_block_max_len: int = 32,
     ):
         """
         Initialize collator.
@@ -39,6 +218,7 @@ class MaskedCollator:
         self.path_mask_prob = path_mask_prob
         self.mask_path = mask_path
         self.mask_vocab_only = mask_vocab_only
+        self.path_mask_block_max_len = path_mask_block_max_len
 
         # Check if char_mask_prob is a range
         if isinstance(char_mask_prob, (tuple, list)):
@@ -119,7 +299,10 @@ class MaskedCollator:
 
     def mask_path_points(self, path_coords: torch.Tensor, path_mask: torch.Tensor) -> tuple:
         """
-        Mask path coordinates by replacing with zeros (vectorized).
+        Mask path coordinates by replacing with zeros.
+
+        Uses contiguous block masking (not independent per-point masking) so the model
+        sees larger missing segments rather than many tiny holes.
 
         Args:
             path_coords: [batch, seq_len, 3] path coordinates
@@ -135,13 +318,22 @@ class MaskedCollator:
         masked_coords = path_coords.clone()
         labels = path_coords.clone()
 
-        # Vectorized masking: create random decisions for all points
-        mask_decisions = torch.rand(batch_size, seq_len) < self.path_mask_prob
-        mask_decisions = mask_decisions & (path_mask == 1)  # Only mask valid points
+        mask_indices = torch.zeros(batch_size, seq_len, dtype=torch.long)
+        for b in range(batch_size):
+            n_valid = int(path_mask[b].sum().item())
+            if n_valid == 0 or self.path_mask_prob <= 0.0:
+                continue
+            n_to_mask = int(round(float(self.path_mask_prob) * n_valid))
+            if n_to_mask <= 0:
+                continue
+            mask_indices[b] = _mask_contiguous_blocks_1d(
+                path_mask[b],
+                n_to_mask,
+                max_block_len=self.path_mask_block_max_len,
+                rng=random,
+            )
 
-        # Zero out masked coordinates
-        mask_indices = mask_decisions.long()
-        masked_coords[mask_decisions] = 0.0
+        masked_coords[mask_indices.bool()] = 0.0
 
         return masked_coords, labels, mask_indices
 
@@ -196,6 +388,13 @@ class MaskedCollator:
             result["path_labels"] = path_labels
             result["path_mask_indices"] = path_mask_indices
 
+        # Length targets are always available from the word string (used for metrics and optional loss).
+        max_len = char_tokens.shape[1]
+        result["length_target"] = torch.tensor(
+            [_swipable_length(item["word"], max_len) for item in batch], dtype=torch.long
+        )
+        result["length_supervise_mask"] = torch.ones(len(batch), dtype=torch.long)
+
         return result
 
 
@@ -223,6 +422,7 @@ class PairwiseMaskedCollator:
         mask_path: bool = True,
         modality_prob: float = 0.2,
         zero_attention_prob: float = 0.5,
+        path_mask_block_max_len: int = 32,
         inverted_char_prob_heavy: float | tuple[float, float] = (0.5, 0.7),
         inverted_path_prob_heavy: float | tuple[float, float] = (0.5, 0.7),
         inverted_char_prob_light: float | tuple[float, float] = (0.1, 0.2),
@@ -243,6 +443,7 @@ class PairwiseMaskedCollator:
         self.mask_path = mask_path
         self.modality_prob = modality_prob
         self.zero_attention_prob = zero_attention_prob
+        self.path_mask_block_max_len = path_mask_block_max_len
         self.max_char_len = None  # derived per-sample
         # Configurable inverted-mode probabilities (can be floats or (min,max) ranges)
         self.pairwise_inverted_char_prob_heavy = inverted_char_prob_heavy
@@ -277,12 +478,18 @@ class PairwiseMaskedCollator:
             path_mask_prob = _prob_from_cfg(self.pairwise_inverted_path_prob_light)
             text_mask_prob = _prob_from_cfg(self.pairwise_inverted_char_prob_light)
 
-        # Create path mask
+        # Create path mask (contiguous block masking)
         path_mask_indices = torch.zeros(path_len, dtype=torch.long)
-        if self.mask_path:
-            for i in range(path_len):
-                if path_mask[i] == 1 and random.random() < path_mask_prob:
-                    path_mask_indices[i] = 1
+        if self.mask_path and path_mask_prob > 0.0:
+            n_valid = int(path_mask.sum().item())
+            n_to_mask = int(round(float(path_mask_prob) * n_valid))
+            if n_to_mask > 0:
+                path_mask_indices = _mask_contiguous_blocks_1d(
+                    path_mask,
+                    n_to_mask,
+                    max_block_len=self.path_mask_block_max_len,
+                    rng=random,
+                )
 
         # Create character mask (exclude PAD only, allow EOS to be masked)
         char_mask_indices = torch.zeros(char_len, dtype=torch.long)
@@ -363,10 +570,6 @@ class PairwiseMaskedCollator:
         gradient_mask = []  # 1 = gets gradients (query), 0 = detached (key)
         length_targets = []
         length_supervise_mask = []
-
-        def _swipable_length(word: str, max_len: int) -> int:
-            length = sum(1 for c in word.lower() if c.isalpha() or c.isdigit())
-            return min(length, max_len)
 
         for pair_id, item in enumerate(batch):
             path_coords = item["path_coords"]
@@ -529,6 +732,12 @@ class ValidationCollator:
         sep_mask = torch.ones(batch_size, 1, dtype=torch.long)
         attention_mask = torch.cat([cls_mask, path_mask, sep_mask, char_mask], dim=1)
 
+        words = [item["word"] for item in batch]
+        max_len = char_tokens.shape[1]
+        length_target = torch.tensor(
+            [_swipable_length(w, max_len) for w in words], dtype=torch.long
+        )
+
         return {
             "path_coords": path_coords,
             "input_ids": masked_char_tokens,  # Renamed from char_tokens
@@ -536,5 +745,7 @@ class ValidationCollator:
             "path_mask": path_mask,
             "char_mask": char_mask,
             "attention_mask": attention_mask,
-            "words": [item["word"] for item in batch],
+            "words": words,
+            "length_target": length_target,
+            "length_supervise_mask": torch.ones(batch_size, dtype=torch.long),
         }

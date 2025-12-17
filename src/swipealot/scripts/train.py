@@ -8,17 +8,9 @@ import torch
 from rich.logging import RichHandler
 from transformers import TrainingArguments
 
-# Configure logging with rich handler
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True, markup=True)],
-)
-logger = logging.getLogger(__name__)
-
 from swipealot.config import Config
 from swipealot.data import (
+    CharacterTokenizer,
     MaskedCollator,
     PairwiseMaskedCollator,
     SwipeDataset,
@@ -28,6 +20,15 @@ from swipealot.data import (
 from swipealot.huggingface import SwipeTransformerConfig, SwipeTransformerModel
 from swipealot.training import SwipeLoss
 from swipealot.training.trainer import SwipeTrainer, create_compute_metrics_fn
+
+# Configure logging with rich handler
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True, markup=True)],
+)
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -74,17 +75,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: [green]{device}[/green]")
 
-    # Build tokenizer from training data
-    logger.info("Building tokenizer...")
-    # Load small sample to build vocabulary
-    sample_dataset = SwipeDataset(
-        split=config.data.train_split,
-        max_path_len=config.data.max_path_len,
-        max_word_len=config.data.max_char_len,
-        dataset_name=config.data.dataset_name,
-        max_samples=10000,  # Use subset for vocab building
-    )
-    tokenizer = sample_dataset.tokenizer
+    # Tokenizer is deterministic (not dataset-derived)
+    logger.info("Creating tokenizer...")
+    tokenizer = CharacterTokenizer()
     config.model.vocab_size = tokenizer.vocab_size
     logger.info(f"Vocabulary size: [magenta]{tokenizer.vocab_size}[/magenta]")
 
@@ -129,7 +122,9 @@ def main():
             f"Loaded weights tensor shape: {tuple(char_freq_weights.shape)} (mean {char_freq_weights.mean():.4f})"
         )
     else:
-        logger.info("Character frequency weights: [dim]disabled (use_char_freq_weights=False)[/dim]")
+        logger.info(
+            "Character frequency weights: [dim]disabled (use_char_freq_weights=False)[/dim]"
+        )
 
     # Create datasets
     logger.info("Loading datasets...")
@@ -202,7 +197,10 @@ def main():
         n_layers=config.model.n_layers,
         d_ff=config.model.d_ff,
         dropout=config.model.dropout,
+        path_input_dim=config.model.path_input_dim,
+        predict_char=config.model.predict_char,
         predict_path=config.model.predict_path,
+        predict_length=config.model.predict_length,
         pad_token_id=tokenizer.pad_token_id,
         cls_token_id=tokenizer.cls_token_id,
         sep_token_id=tokenizer.sep_token_id,
@@ -256,14 +254,22 @@ def main():
     training_args = TrainingArguments(**training_args_dict)
 
     # Calculate total training steps for logging
-    batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+    batch_size = (
+        training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+    )
     total_train_steps = (len(train_dataset) // batch_size) * training_args.num_train_epochs
     warmup_steps = training_args_dict.get("warmup_steps", 0)
-    warmup_ratio = training_args.warmup_ratio if warmup_steps == 0 else (warmup_steps / total_train_steps if total_train_steps > 0 else 0)
+    warmup_ratio = (
+        training_args.warmup_ratio
+        if warmup_steps == 0
+        else (warmup_steps / total_train_steps if total_train_steps > 0 else 0)
+    )
 
     logger.info(f"Training for [yellow]{training_args.num_train_epochs}[/yellow] epochs")
     logger.info(f"Total training steps: ~[yellow]{total_train_steps:,}[/yellow]")
-    logger.info(f"Warmup steps: [yellow]{int(warmup_ratio * total_train_steps)}[/yellow] ([dim]{warmup_ratio:.2%} of total[/dim])")
+    logger.info(
+        f"Warmup steps: [yellow]{int(warmup_ratio * total_train_steps)}[/yellow] ([dim]{warmup_ratio:.2%} of total[/dim])"
+    )
     logger.info(f"Learning rate: [yellow]{training_args.learning_rate:.2e}[/yellow]")
     logger.info(f"Mixed precision: bf16={training_args.bf16}, fp16={training_args.fp16}")
     logger.info(f"Reporting to: [cyan]{', '.join(training_args.report_to)}[/cyan]")
@@ -298,7 +304,6 @@ def main():
     trainer.save_model(final_path)
 
     # Prepare checkpoint for HuggingFace Hub
-    from pathlib import Path
     from swipealot.training.checkpoint_utils import prepare_checkpoint_for_hub
 
     logger.info("Preparing checkpoint for HuggingFace Hub...")
@@ -308,7 +313,7 @@ def main():
     logger.info("  [green]✓[/green] Updated config.json with auto_map")
 
     # Save tokenizer and processor (auto_map is added automatically in save_pretrained)
-    from swipealot.huggingface import SwipeTokenizer, SwipeProcessor
+    from swipealot.huggingface import SwipeProcessor, SwipeTokenizer
 
     hf_tokenizer = SwipeTokenizer()
     hf_tokenizer._tokenizer = tokenizer
@@ -326,11 +331,17 @@ def main():
     logger.info("=" * 60)
     logger.info("[bold green]✅ Training complete![/bold green]")
     logger.info(f"[bold green]✅[/bold green] Model saved to: [cyan]{output_dir}/final[/cyan]")
-    logger.info("[bold green]✅[/bold green] Model is HuggingFace-compatible - no conversion needed!")
+    logger.info(
+        "[bold green]✅[/bold green] Model is HuggingFace-compatible - no conversion needed!"
+    )
     logger.info("\n[bold]To load the model:[/bold]")
     logger.info("  [dim]from transformers import AutoModel, AutoProcessor[/dim]")
-    logger.info(f"  [dim]model = AutoModel.from_pretrained('{output_dir}/final', trust_remote_code=True)[/dim]")
-    logger.info(f"  [dim]processor = AutoProcessor.from_pretrained('{output_dir}/final', trust_remote_code=True)[/dim]")
+    logger.info(
+        f"  [dim]model = AutoModel.from_pretrained('{output_dir}/final', trust_remote_code=True)[/dim]"
+    )
+    logger.info(
+        f"  [dim]processor = AutoProcessor.from_pretrained('{output_dir}/final', trust_remote_code=True)[/dim]"
+    )
 
 
 if __name__ == "__main__":

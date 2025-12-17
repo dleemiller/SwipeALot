@@ -24,6 +24,9 @@ class ModelConfig:
     max_path_len: int = 64
     max_char_len: int = 38
 
+    # Path features
+    path_input_dim: int = 6  # (x, y, dx, dy, ds, log_dt)
+
     # Tasks
     predict_path: bool = True
     predict_char: bool = True  # Core MLM objective (can be disabled with char_loss_weight=0)
@@ -74,10 +77,12 @@ class TrainingConfig:
     use_pairwise_masking: bool = False
     pairwise_modality_prob: float = 0.2  # Probability of using modality-based masking (vs inverted)
     pairwise_zero_attention_prob: float = 0.5  # Probability of zeroing attention in modality mode
-    pairwise_inverted_char_prob_heavy: float | tuple[float, float] = (0.5, 0.7)
-    pairwise_inverted_path_prob_heavy: float | tuple[float, float] = (0.5, 0.7)
-    pairwise_inverted_char_prob_light: float | tuple[float, float] = (0.1, 0.2)
-    pairwise_inverted_path_prob_light: float | tuple[float, float] = (0.1, 0.2)
+    # NOTE: OmegaConf structured configs do not support unions of container types, so these
+    # are typed as `Any` and validated/consumed by the collator (float or 2-item range).
+    pairwise_inverted_char_prob_heavy: Any = (0.5, 0.7)
+    pairwise_inverted_path_prob_heavy: Any = (0.5, 0.7)
+    pairwise_inverted_char_prob_light: Any = (0.1, 0.2)
+    pairwise_inverted_path_prob_light: Any = (0.1, 0.2)
     contrastive_weight: float = 0.0
     contrastive_temperature: float = 0.1
 

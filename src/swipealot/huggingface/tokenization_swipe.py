@@ -179,12 +179,10 @@ class SwipeTokenizer(PreTrainedTokenizer):
 
         tokenizer_config_path = Path(save_directory) / "tokenizer_config.json"
         if tokenizer_config_path.exists():
-            with open(tokenizer_config_path, "r") as f:
+            with open(tokenizer_config_path) as f:
                 config = json.load(f)
 
-            config["auto_map"] = {
-                "AutoTokenizer": ["tokenization_swipe.SwipeTokenizer", None]
-            }
+            config["auto_map"] = {"AutoTokenizer": ["tokenization_swipe.SwipeTokenizer", None]}
 
             with open(tokenizer_config_path, "w") as f:
                 json.dump(config, f, indent=2)

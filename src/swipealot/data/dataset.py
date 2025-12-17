@@ -1,4 +1,7 @@
-"""SwipeDataset and coordinate preprocessing utilities."""
+"""SwipeDataset implementation.
+
+Preprocessing utilities live in `swipealot.data.preprocessing`.
+"""
 
 from typing import Any
 
@@ -7,97 +10,14 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
+from .preprocessing import normalize_and_compute_features, sample_path_points_with_features
 from .tokenizer import CharacterTokenizer
 
-
-def normalize_coordinates(
-    data_points: list[dict], canvas_width: float, canvas_height: float
-) -> list[dict]:
-    """
-    Normalize swipe coordinates and timestamps.
-
-    Args:
-        data_points: List of dicts with 'x', 'y', 't' keys
-        canvas_width: Canvas width for normalization
-        canvas_height: Canvas height for normalization
-
-    Returns:
-        List of normalized coordinate dicts
-    """
-    if not data_points:
-        return []
-
-    # Extract timestamps for normalization
-    timestamps = [p["t"] for p in data_points]
-    t_min = min(timestamps)
-    t_max = max(timestamps)
-    t_range = t_max - t_min if t_max > t_min else 1.0
-
-    normalized = []
-    for point in data_points:
-        # x and y are already normalized to [0,1] in the dataset
-        # But sometimes they go slightly outside bounds, so clamp them
-        x_norm = max(0.0, min(1.0, point["x"]))
-        y_norm = max(0.0, min(1.0, point["y"]))
-
-        # Normalize timestamp to [0, 1]
-        t_norm = (point["t"] - t_min) / t_range
-
-        normalized.append({"x": x_norm, "y": y_norm, "t": t_norm})
-
-    return normalized
-
-
-def sample_path_points(data_points: list[dict], max_len: int) -> tuple:
-    """
-    Sample or pad path points to fixed length using linear interpolation.
-
-    Args:
-        data_points: List of coordinate dicts
-        max_len: Target length
-
-    Returns:
-        Tuple of (sampled_points, mask) where mask indicates valid (1) vs padding (0)
-    """
-    num_points = len(data_points)
-
-    if num_points == max_len:
-        points = data_points
-        mask = [1] * max_len
-    elif num_points < max_len:
-        # Pad with zeros
-        points = data_points + [{"x": 0.0, "y": 0.0, "t": 0.0}] * (max_len - num_points)
-        mask = [1] * num_points + [0] * (max_len - num_points)
-    else:
-        # Downsample using linear interpolation
-        # Extract coordinates as arrays
-        x_coords = np.array([p["x"] for p in data_points])
-        y_coords = np.array([p["y"] for p in data_points])
-        t_coords = np.array([p["t"] for p in data_points])
-
-        # Original indices (parameter for interpolation)
-        original_indices = np.arange(num_points)
-
-        # Target indices for interpolation (evenly spaced)
-        target_indices = np.linspace(0, num_points - 1, max_len)
-
-        # Interpolate each coordinate independently
-        x_interp = np.interp(target_indices, original_indices, x_coords)
-        y_interp = np.interp(target_indices, original_indices, y_coords)
-        t_interp = np.interp(target_indices, original_indices, t_coords)
-
-        # Reconstruct points
-        points = [
-            {"x": float(x), "y": float(y), "t": float(t)}
-            for x, y, t in zip(x_interp, y_interp, t_interp, strict=True)
-        ]
-        mask = [1] * max_len
-
-    # Convert to numpy arrays
-    coords = np.array([[p["x"], p["y"], p["t"]] for p in points], dtype=np.float32)
-    mask = np.array(mask, dtype=np.int64)
-
-    return coords, mask
+__all__ = [
+    "normalize_and_compute_features",
+    "sample_path_points_with_features",
+    "SwipeDataset",
+]
 
 
 class SwipeDataset(Dataset):
@@ -145,14 +65,14 @@ class SwipeDataset(Dataset):
 
         # Process swipe path
         data_points = sample["data"]
-        canvas_width = sample.get("canvas_width", 1.0)
-        canvas_height = sample.get("canvas_height", 1.0)
 
-        # Normalize coordinates (data is already in canonical orientation)
-        normalized_points = normalize_coordinates(data_points, canvas_width, canvas_height)
+        # Normalize and compute motion features (x, y, dx, dy, ds, log_dt)
+        processed_points = normalize_and_compute_features(data_points)
 
-        # Sample/pad to fixed length
-        path_coords, path_mask = sample_path_points(normalized_points, self.max_path_len)
+        # Spatially uniform resampling to fixed length with 6D features
+        path_features, path_mask = sample_path_points_with_features(
+            processed_points, self.max_path_len
+        )
 
         # Process word
         word = sample["word"]
@@ -174,7 +94,7 @@ class SwipeDataset(Dataset):
         char_mask = [1 if token != self.tokenizer.pad_token_id else 0 for token in char_tokens]
 
         return {
-            "path_coords": torch.tensor(path_coords, dtype=torch.float32),  # [max_path_len, 3]
+            "path_coords": torch.tensor(path_features, dtype=torch.float32),  # [max_path_len, 6]
             "char_tokens": torch.tensor(char_tokens, dtype=torch.long),  # [max_word_len]
             "path_mask": torch.tensor(path_mask, dtype=torch.long),  # [max_path_len]
             "char_mask": torch.tensor(char_mask, dtype=torch.long),  # [max_word_len]

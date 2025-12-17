@@ -128,12 +128,17 @@ class SwipeLoss(nn.Module):
             device = batch["path_coords"].device
             char_loss = torch.tensor(0.0, device=device)
         else:
-            # Extract character portion from sequence
-            # Sequence structure: [CLS] + path + [SEP] + chars
-            path_len = batch["path_coords"].shape[1]
-            char_logits_subset = extract_character_logits(
-                char_logits, path_len, char_labels.shape[1]
-            )
+            # Support both:
+            # - `char_logits` over the text segment only: [B, char_len, V]
+            # - legacy `char_logits` over the full mixed sequence: [B, seq_len, V]
+            if char_logits.shape[1] == char_labels.shape[1]:
+                char_logits_subset = char_logits
+            else:
+                # Sequence structure: [CLS] + path + [SEP] + chars
+                path_len = batch["path_coords"].shape[1]
+                char_logits_subset = extract_character_logits(
+                    char_logits, path_len, char_labels.shape[1]
+                )
 
             # Flatten for loss computation
             char_logits_flat = char_logits_subset.reshape(-1, char_logits_subset.shape[-1])
@@ -167,22 +172,28 @@ class SwipeLoss(nn.Module):
         losses["char_loss"] = char_loss
 
         # Path prediction loss (if enabled)
-        has_path_pred = "path_coords_pred" in outputs if isinstance(outputs, dict) else hasattr(outputs, "path_coords_pred")
-        if has_path_pred and batch.get("path_labels") is not None:
-            if isinstance(outputs, dict):
-                path_pred = outputs["path_coords_pred"]  # [batch, full_seq_len, 3]
-            else:
-                path_pred = outputs.path_coords_pred  # [batch, full_seq_len, 3]
-            path_labels = batch["path_labels"]  # [batch, path_len, 3]
-            path_mask_indices = batch["path_mask_indices"]  # [batch, path_len]
+        if isinstance(outputs, dict):
+            path_pred = outputs.get("path_logits", outputs.get("path_coords_pred"))
+        else:
+            path_pred = getattr(outputs, "path_logits", getattr(outputs, "path_coords_pred", None))
 
-            # Extract path portion from sequence
-            path_start = 1  # Skip [CLS]
-            path_end = 1 + path_len
-            path_pred_subset = path_pred[:, path_start:path_end, :]  # [batch, path_len, 3]
+        if path_pred is not None and batch.get("path_labels") is not None:
+            path_labels = batch["path_labels"]  # [batch, path_len, path_input_dim]
+            path_mask_indices = batch["path_mask_indices"]  # [batch, path_len]
+            path_len = path_labels.shape[1]
+
+            # Support both:
+            # - `path_pred` over the path segment only: [B, path_len, D]
+            # - legacy `path_pred` over the full mixed sequence: [B, seq_len, D]
+            if path_pred.shape[1] == path_len:
+                path_pred_subset = path_pred
+            else:
+                path_start = 1  # Skip [CLS]
+                path_end = 1 + path_len
+                path_pred_subset = path_pred[:, path_start:path_end, :]
 
             # Compute MSE only on masked positions
-            path_loss = self.path_loss_fn(path_pred_subset, path_labels)  # [batch, path_len, 3]
+            path_loss = self.path_loss_fn(path_pred_subset, path_labels)  # [batch, path_len, D]
 
             # Apply mask: only compute loss where we actually masked points
             path_mask_expanded = path_mask_indices.unsqueeze(-1).float()  # [batch, path_len, 1]
@@ -203,7 +214,11 @@ class SwipeLoss(nn.Module):
             total_loss = total_loss + self.path_weight * losses["path_loss"]
 
         # CLS length prediction (optional)
-        has_length_logits = "length_logits" in outputs if isinstance(outputs, dict) else hasattr(outputs, "length_logits")
+        has_length_logits = (
+            "length_logits" in outputs
+            if isinstance(outputs, dict)
+            else hasattr(outputs, "length_logits")
+        )
         if (
             self.length_weight > 0.0
             and has_length_logits
@@ -229,7 +244,9 @@ class SwipeLoss(nn.Module):
         if self.contrastive_weight > 0.0 and "pair_ids" in batch:
             # Use last_hidden_state (always available) instead of hidden_states (only with output_hidden_states=True)
             if isinstance(outputs, dict):
-                hidden_states = outputs.get("last_hidden_state", outputs.get("hidden_states"))  # [N, seq_len, d]
+                hidden_states = outputs.get(
+                    "last_hidden_state", outputs.get("hidden_states")
+                )  # [N, seq_len, d]
             else:
                 hidden_states = outputs.last_hidden_state  # [N, seq_len, d]
             pair_ids = batch["pair_ids"]  # [N]

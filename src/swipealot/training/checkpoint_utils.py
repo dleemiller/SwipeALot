@@ -18,7 +18,8 @@ def prepare_checkpoint_for_hub(output_dir: str | Path) -> None:
     2. Fixes imports in modeling_swipe.py to use flat file structure
     3. Copies model dependencies (embeddings.py, heads.py, tokenizer.py)
     4. Fixes imports in tokenization_swipe.py
-    5. Updates config.json with auto_map for AutoModel
+    5. Copies preprocessing dependencies for SwipeProcessor
+    6. Updates config.json with auto_map for AutoModel
 
     Args:
         output_dir: Path to checkpoint directory
@@ -54,9 +55,7 @@ def prepare_checkpoint_for_hub(output_dir: str | Path) -> None:
                 if filename == "modeling_swipe.py":
                     content = dest_file.read_text()
                     # Change relative imports to flat structure
-                    content = content.replace(
-                        "from ..models.embeddings", "from .embeddings"
-                    )
+                    content = content.replace("from ..models.embeddings", "from .embeddings")
                     content = content.replace("from ..models.heads", "from .heads")
                     dest_file.write_text(content)
 
@@ -78,6 +77,11 @@ def prepare_checkpoint_for_hub(output_dir: str | Path) -> None:
         if tokenizer_file.exists():
             shutil.copy(tokenizer_file, output_dir / "tokenizer.py")
 
+        # Copy preprocessing helpers used by SwipeProcessor
+        preprocessing_file = data_dir / "preprocessing.py"
+        if preprocessing_file.exists():
+            shutil.copy(preprocessing_file, output_dir / "preprocessing.py")
+
         # Fix imports in tokenization_swipe.py for standalone loading
         tokenization_file = output_dir / "tokenization_swipe.py"
         if tokenization_file.exists():
@@ -86,10 +90,17 @@ def prepare_checkpoint_for_hub(output_dir: str | Path) -> None:
             content = content.replace("from ..data.tokenizer", "from .tokenizer")
             tokenization_file.write_text(content)
 
+        # Fix imports in processing_swipe.py for standalone loading
+        processing_file = output_dir / "processing_swipe.py"
+        if processing_file.exists():
+            content = processing_file.read_text()
+            content = content.replace("from ..data.preprocessing", "from .preprocessing")
+            processing_file.write_text(content)
+
         # Update config.json with auto_map for AutoModel loading
         config_path = output_dir / "config.json"
         if config_path.exists():
-            with open(config_path, "r") as f:
+            with open(config_path) as f:
                 config_dict = json.load(f)
 
             config_dict["auto_map"] = {

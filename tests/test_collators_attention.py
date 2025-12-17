@@ -2,7 +2,12 @@
 
 import torch
 
-from swipealot.data import CharacterTokenizer, MaskedCollator, PairwiseMaskedCollator, ValidationCollator
+from swipealot.data import (
+    CharacterTokenizer,
+    MaskedCollator,
+    PairwiseMaskedCollator,
+    ValidationCollator,
+)
 from swipealot.huggingface import SwipeProcessor
 
 
@@ -10,9 +15,11 @@ def _sample(tokenizer: CharacterTokenizer, word: str, path_len: int, char_len: i
     token_ids = tokenizer.encode(word) + [tokenizer.eos_token_id]
     token_ids = token_ids[: char_len - 1] + [tokenizer.eos_token_id]
     token_ids = token_ids + [tokenizer.pad_token_id] * (char_len - len(token_ids))
-    char_mask = torch.tensor([1 if t != tokenizer.pad_token_id else 0 for t in token_ids], dtype=torch.long)
+    char_mask = torch.tensor(
+        [1 if t != tokenizer.pad_token_id else 0 for t in token_ids], dtype=torch.long
+    )
     return {
-        "path_coords": torch.randn(path_len, 3),
+        "path_coords": torch.randn(path_len, 6),
         "path_mask": torch.ones(path_len, dtype=torch.long),
         "char_tokens": torch.tensor(token_ids, dtype=torch.long),
         "char_mask": char_mask,
@@ -43,7 +50,7 @@ def test_masked_collator_attention_and_labels():
     assert torch.all(batch["attention_mask"][:, -7:] == batch["char_mask"])
 
     # Path masking outputs exist and align in shape
-    assert batch["path_labels"].shape == (2, 5, 3)
+    assert batch["path_labels"].shape == (2, 5, 6)
     assert batch["path_mask_indices"].shape == (2, 5)
 
     # Character labels should ignore padding
@@ -140,7 +147,24 @@ def test_processor_attention_when_text_missing():
     char_attn = inputs["attention_mask"][0, -(processor.max_char_len) :]
     assert torch.all(char_attn == 0)
     # Path portion attends; length matches 1+path+1+chars
-    assert inputs["attention_mask"].shape[1] == 1 + processor.max_path_len + 1 + processor.max_char_len
+    assert (
+        inputs["attention_mask"].shape[1] == 1 + processor.max_path_len + 1 + processor.max_char_len
+    )
+
+
+def test_processor_accepts_raw_dict_paths():
+    tokenizer = CharacterTokenizer()
+    processor = SwipeProcessor(tokenizer=tokenizer, max_path_len=4, max_char_len=6)
+
+    raw_path = [{"x": 0.1, "y": 0.2, "t": 1000.0}, {"x": 0.2, "y": 0.3, "t": 1010.0}]
+    inputs = processor(path_coords=raw_path, text=None, return_tensors="pt")
+
+    assert inputs["path_coords"].shape == (1, processor.max_path_len, 6)
+    assert inputs["input_ids"].shape == (1, processor.max_char_len)
+    assert (
+        inputs["attention_mask"].shape[1] == 1 + processor.max_path_len + 1 + processor.max_char_len
+    )
+    assert torch.all(inputs["attention_mask"][0, -(processor.max_char_len) :] == 0)
 
 
 def test_pairwise_collator_zero_attention_prob():
@@ -166,3 +190,22 @@ def test_pairwise_collator_zero_attention_prob():
     assert path_segment.sum() == 0
     # text attended
     assert attn_b[-5:].sum() == 5
+
+
+def test_pairwise_collator_accepts_custom_inverted_probs():
+    tokenizer = CharacterTokenizer()
+    custom_collator = PairwiseMaskedCollator(
+        tokenizer=tokenizer,
+        mask_path=True,
+        modality_prob=0.0,
+        zero_attention_prob=0.0,
+        inverted_char_prob_heavy=0.9,
+        inverted_path_prob_heavy=0.8,
+        inverted_char_prob_light=0.3,
+        inverted_path_prob_light=0.25,
+    )
+
+    assert custom_collator.pairwise_inverted_char_prob_heavy == 0.9
+    assert custom_collator.pairwise_inverted_path_prob_heavy == 0.8
+    assert custom_collator.pairwise_inverted_char_prob_light == 0.3
+    assert custom_collator.pairwise_inverted_path_prob_light == 0.25

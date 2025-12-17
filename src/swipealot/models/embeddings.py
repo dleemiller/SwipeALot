@@ -5,16 +5,26 @@ import torch.nn as nn
 
 
 class PathEmbedding(nn.Module):
-    """Embeds path coordinates (x, y, t) to d_model dimension."""
+    """Embeds path features (x, y, dx, dy, ds, log_dt) to d_model dimension."""
 
-    def __init__(self, d_model: int = 256):
+    def __init__(self, d_model: int = 256, input_dim: int = 6):
+        """
+        Initialize path embedding layer.
+
+        Args:
+            d_model: Output dimension
+            input_dim: Input feature dimension (default: 6 for x, y, dx, dy, ds, log_dt)
+        """
         super().__init__()
-        self.projection = nn.Linear(3, d_model)
+        self.projection = nn.Linear(input_dim, d_model)
 
     def forward(self, path_coords: torch.Tensor) -> torch.Tensor:
         """
+        Project path features to d_model dimension.
+
         Args:
-            path_coords: [batch, seq_len, 3] - (x, y, t) coordinates
+            path_coords: [batch, seq_len, input_dim] - path features
+                         Default: (x, y, dx, dy, ds, log_dt) with input_dim=6
 
         Returns:
             [batch, seq_len, d_model] embeddings
@@ -90,12 +100,13 @@ class MixedEmbedding(nn.Module):
         max_char_len: int,
         d_model: int = 256,
         dropout: float = 0.1,
+        path_input_dim: int = 6,
     ):
         super().__init__()
         self.d_model = d_model
 
         # Content embeddings
-        self.path_embedding = PathEmbedding(d_model)
+        self.path_embedding = PathEmbedding(d_model, input_dim=path_input_dim)
         self.char_embedding = CharacterEmbedding(vocab_size, d_model, padding_idx=0)
 
         # Positional embeddings
@@ -120,7 +131,8 @@ class MixedEmbedding(nn.Module):
         Create mixed sequence with embeddings.
 
         Args:
-            path_coords: [batch, path_len, 3] path coordinates
+            path_coords: [batch, path_len, path_input_dim] path features
+                         Default: [batch, path_len, 6] for (x, y, dx, dy, ds, log_dt)
             char_tokens: [batch, char_len] character token IDs
             cls_token: [batch, 1] CLS token IDs
             sep_token: [batch, 1] SEP token IDs

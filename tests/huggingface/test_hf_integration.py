@@ -65,7 +65,7 @@ class TestModels:
 
         # Create dummy inputs
         batch_size = 2
-        path_coords = torch.randn(batch_size, 32, 3)
+        path_coords = torch.randn(batch_size, 32, config.path_input_dim)
         input_ids = torch.randint(0, 100, (batch_size, 20))
         # Sequence: [CLS] + path_tokens + [SEP] + char_tokens
         seq_len = 1 + 32 + 1 + 20  # = 54
@@ -79,8 +79,10 @@ class TestModels:
                 attention_mask=attention_mask,
             )
 
-        # Model outputs logits for entire sequence
-        assert outputs.char_logits.shape == (batch_size, seq_len, 100)
+        # Model outputs logits for text segment only
+        assert outputs.char_logits.shape == (batch_size, 20, 100)
+        # Hidden states are for the full mixed sequence: [CLS] + path + [SEP] + chars
+        assert outputs.last_hidden_state.shape == (batch_size, seq_len, config.d_model)
 
     def test_save_load_model(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -148,7 +150,7 @@ class TestProcessor:
         assert "path_coords" in inputs
         assert "input_ids" in inputs
         assert "attention_mask" in inputs
-        assert inputs["path_coords"].shape[-1] == 3
+        assert inputs["path_coords"].shape[-1] == 6
         # Check attention mask has correct length: [CLS] + path + [SEP] + chars
         assert inputs["attention_mask"].shape[1] == 1 + 32 + 1 + 20
 
@@ -238,7 +240,7 @@ class TestIntegration:
             processor = SwipeProcessor(tokenizer=tokenizer, max_path_len=32, max_char_len=20)
 
             # Create inputs
-            path_coords = torch.randn(2, 32, 3)
+            path_coords = torch.randn(2, 32, config.path_input_dim)
             text = ["hello", "world"]
             inputs = processor(path_coords, text, return_tensors="pt")
 

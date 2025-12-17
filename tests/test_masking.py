@@ -7,7 +7,7 @@ from swipealot.data import CharacterTokenizer, MaskedCollator
 
 
 def _make_sample(tokenizer: CharacterTokenizer, word: str, path_len: int, char_len: int):
-    path_coords = torch.randn(path_len, 3)
+    path_coords = torch.randn(path_len, 6)
     path_mask = torch.ones(path_len, dtype=torch.long)
 
     token_ids = tokenizer.encode(word) + [tokenizer.eos_token_id]
@@ -70,6 +70,64 @@ def test_independent_masking():
         # Allow a loose tolerance; probabilities are stochastic
         assert abs(char_masked_pct - cfg["char"] * 100) < 10
         assert abs(path_masked_pct - cfg["path"] * 100) < 10
+
+
+def test_path_masking_produces_contiguous_blocks():
+    tokenizer = CharacterTokenizer()
+    sample = _make_sample(tokenizer, "hello", path_len=32, char_len=16)
+    collator = MaskedCollator(
+        tokenizer=tokenizer,
+        char_mask_prob=0.0,
+        path_mask_prob=0.5,
+        mask_path=True,
+        path_mask_block_max_len=32,
+    )
+
+    batch = collator([sample])
+    mask = batch["path_mask_indices"][0].tolist()
+
+    # Ensure we masked something.
+    assert sum(mask) > 0
+
+    # Compute maximum contiguous run of masked points; with block masking it should be >= 2.
+    max_run = 0
+    cur = 0
+    for v in mask:
+        if v == 1:
+            cur += 1
+            max_run = max(max_run, cur)
+        else:
+            cur = 0
+
+    assert max_run >= 2
+
+
+def test_path_masking_respects_max_block_len_cap():
+    tokenizer = CharacterTokenizer()
+    sample = _make_sample(tokenizer, "hello", path_len=128, char_len=16)
+    cap = 32
+    collator = MaskedCollator(
+        tokenizer=tokenizer,
+        char_mask_prob=0.0,
+        path_mask_prob=0.9,
+        mask_path=True,
+        path_mask_block_max_len=cap,
+    )
+
+    batch = collator([sample])
+    mask = batch["path_mask_indices"][0].tolist()
+    assert sum(mask) > 0
+
+    max_run = 0
+    cur = 0
+    for v in mask:
+        if v == 1:
+            cur += 1
+            max_run = max(max_run, cur)
+        else:
+            cur = 0
+
+    assert max_run <= cap
 
 
 if __name__ == "__main__":

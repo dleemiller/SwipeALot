@@ -32,11 +32,11 @@ class CharacterPredictionHead(nn.Module):
 class PathPredictionHead(nn.Module):
     """Prediction head for masked path coordinates."""
 
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, output_dim: int = 6):
         super().__init__()
         self.dense = nn.Linear(d_model, d_model)
         self.layer_norm = nn.LayerNorm(d_model)
-        self.decoder = nn.Linear(d_model, 3)  # Predict (x, y, t)
+        self.decoder = nn.Linear(d_model, output_dim)
         self.activation = nn.GELU()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -45,14 +45,27 @@ class PathPredictionHead(nn.Module):
             hidden_states: [batch, seq_len, d_model]
 
         Returns:
-            [batch, seq_len, 3] coordinates in [0, 1] range
+            [batch, seq_len, output_dim] path features.
         """
         x = self.dense(hidden_states)
         x = self.activation(x)
         x = self.layer_norm(x)
-        coords = self.decoder(x)
-        coords = torch.sigmoid(coords)  # Ensure [0, 1] range
-        return coords
+        features = self.decoder(x)
+
+        # Per-feature constraints:
+        # - x, y are normalized to [0,1]
+        # - dx, dy are signed deltas (roughly [-1,1])
+        # - ds is non-negative
+        # - log_dt is non-negative
+        if features.shape[-1] == 6:
+            x_y = torch.sigmoid(features[..., 0:2])
+            dx_dy = torch.tanh(features[..., 2:4])
+            ds = torch.nn.functional.softplus(features[..., 4:5])
+            log_dt = torch.nn.functional.softplus(features[..., 5:6])
+            return torch.cat([x_y, dx_dy, ds, log_dt], dim=-1)
+
+        # Fallback: unconstrained regression for other output dims.
+        return features
 
 
 class ClassificationHead(nn.Module):

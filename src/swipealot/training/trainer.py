@@ -5,7 +5,7 @@ import logging
 import torch
 from transformers import Trainer
 
-from .metrics import CharacterAccuracy, WordAccuracy
+from .metrics import CharacterAccuracy
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,10 @@ class SwipeTrainer(Trainer):
 
         # Save tokenizer and processor for hub-ready checkpoints
         try:
-            from swipealot.huggingface import SwipeTokenizer, SwipeProcessor
+            from swipealot.huggingface import SwipeProcessor, SwipeTokenizer
 
             # Get CharacterTokenizer from data_collator
-            if hasattr(self.data_collator, 'tokenizer'):
+            if hasattr(self.data_collator, "tokenizer"):
                 char_tokenizer = self.data_collator.tokenizer
 
                 # Wrap in SwipeTokenizer
@@ -68,6 +68,7 @@ class SwipeTrainer(Trainer):
                     tokenizer=hf_tokenizer,
                     max_path_len=self.model.config.max_path_len,
                     max_char_len=self.model.config.max_char_len,
+                    path_input_dim=getattr(self.model.config, "path_input_dim", 6),
                 )
                 hf_processor.save_pretrained(output_dir)
         except Exception as e:
@@ -103,20 +104,35 @@ class SwipeTrainer(Trainer):
         if prediction_loss_only:
             return (loss, None, None)
 
-        # Extract predictions - we want char_logits for character accuracy
+        # Extract predictions
         if hasattr(outputs, "char_logits"):
-            predictions = outputs.char_logits
+            char_logits = outputs.char_logits
+            length_logits = getattr(outputs, "length_logits", None)
+        elif isinstance(outputs, dict):
+            char_logits = outputs.get("char_logits")
+            length_logits = outputs.get("length_logits")
         else:
-            predictions = outputs.get("char_logits") if isinstance(outputs, dict) else None
+            char_logits = None
+            length_logits = None
 
-        # Extract labels
-        labels = inputs.get("char_labels") if isinstance(inputs, dict) else None
+        predictions = (char_logits, length_logits)
+
+        # Extract labels (for metrics)
+        char_labels = inputs.get("char_labels") if isinstance(inputs, dict) else None
+        length_target = inputs.get("length_target") if isinstance(inputs, dict) else None
+        length_supervise_mask = (
+            inputs.get("length_supervise_mask") if isinstance(inputs, dict) else None
+        )
+        labels = (char_labels, length_target, length_supervise_mask)
 
         # Move to CPU for metrics computation
-        if predictions is not None:
-            predictions = predictions.detach().cpu()
-        if labels is not None:
-            labels = labels.detach().cpu()
+        def _to_cpu(x):
+            if x is None:
+                return None
+            return x.detach().cpu() if isinstance(x, torch.Tensor) else x
+
+        predictions = tuple(_to_cpu(x) for x in predictions)
+        labels = tuple(_to_cpu(x) for x in labels)
 
         return (loss, predictions, labels)
 
@@ -162,42 +178,60 @@ def create_compute_metrics_fn(tokenizer):
 
     def compute_metrics(eval_pred):
         """
-        Compute character and word accuracy metrics.
+        Compute character accuracy metrics, and (if available) length regression metrics.
 
         Args:
             eval_pred: EvalPrediction with predictions and label_ids
-                predictions: Model outputs (SwipeTransformerOutput)
-                label_ids: Dict with char_labels and optionally words
+                predictions: Either:
+                    - char_logits
+                    - (char_logits, length_logits)
+                label_ids: Either:
+                    - char_labels
+                    - (char_labels, length_target, length_supervise_mask)
 
         Returns:
             Dict with metrics
         """
         try:
-            # Extract predictions and labels
-            predictions, labels = eval_pred.predictions, eval_pred.label_ids
+            predictions = eval_pred.predictions
+            labels = eval_pred.label_ids
 
-            # Predictions are the full sequence char_logits: [batch, seq_len, vocab_size]
-            # Labels are just the character portion: [batch, char_len]
-            # Sequence structure: [CLS] + path + [SEP] + chars
-            # We need to extract the character portion from predictions
+            # Unpack tuple predictions/labels (newer SwipeTrainer.prediction_step)
+            if isinstance(predictions, (tuple, list)):
+                char_pred = predictions[0] if len(predictions) > 0 else None
+                length_pred = predictions[1] if len(predictions) > 1 else None
+            else:
+                char_pred = predictions
+                length_pred = None
+
+            if isinstance(labels, (tuple, list)):
+                char_labels = labels[0] if len(labels) > 0 else None
+                length_target = labels[1] if len(labels) > 1 else None
+                length_mask = labels[2] if len(labels) > 2 else None
+            else:
+                char_labels = labels
+                length_target = None
+                length_mask = None
 
             # Convert to torch tensors if needed
-            if not isinstance(predictions, torch.Tensor):
-                predictions = torch.tensor(predictions)
-            if not isinstance(labels, torch.Tensor):
-                labels = torch.tensor(labels)
+            if char_pred is None or char_labels is None:
+                return {}
 
-            # Extract character portion from sequence
-            # Sequence is: [CLS] + path + [SEP] + chars
-            # Calculate where chars start dynamically
-            total_seq_len = predictions.shape[1]
-            char_len = labels.shape[1]
-            # path_len = total_seq_len - 1 (CLS) - 1 (SEP) - char_len
-            path_len = total_seq_len - 2 - char_len
-            char_start = 1 + path_len + 1  # After [CLS] + path + [SEP]
-            char_logits = predictions[:, char_start:char_start + char_len, :]  # [batch, char_len, vocab_size]
+            if not isinstance(char_pred, torch.Tensor):
+                char_pred = torch.tensor(char_pred)
+            if not isinstance(char_labels, torch.Tensor):
+                char_labels = torch.tensor(char_labels)
 
-            char_labels = labels
+            # Character logits: prefer new shape [batch, char_len, vocab_size].
+            # Fall back to legacy full-sequence logits [batch, seq_len, vocab_size].
+            char_len = char_labels.shape[1]
+            if char_pred.dim() == 3 and char_pred.shape[1] == char_len:
+                char_logits = char_pred
+            else:
+                total_seq_len = char_pred.shape[1]
+                path_len = total_seq_len - 2 - char_len
+                char_start = 1 + path_len + 1  # After [CLS] + path + [SEP]
+                char_logits = char_pred[:, char_start : char_start + char_len, :]
 
             # Compute character accuracy
             char_accuracy_metric = CharacterAccuracy(vocab_size=tokenizer.vocab_size, device="cpu")
@@ -208,9 +242,37 @@ def create_compute_metrics_fn(tokenizer):
                 "char_accuracy": float(char_acc),
             }
 
-            # Compute word accuracy if words are available
-            # Note: words are not typically available in the standard Trainer eval_pred
-            # This would require a custom data collator that preserves words in labels
+            # Length regression metrics (if available)
+            if length_pred is not None and length_target is not None:
+                if not isinstance(length_pred, torch.Tensor):
+                    length_pred = torch.tensor(length_pred)
+                if not isinstance(length_target, torch.Tensor):
+                    length_target = torch.tensor(length_target)
+                if length_mask is None:
+                    length_mask_t = torch.ones_like(length_target, dtype=torch.bool)
+                else:
+                    length_mask_t = (
+                        length_mask.bool()
+                        if isinstance(length_mask, torch.Tensor)
+                        else torch.tensor(length_mask).bool()
+                    )
+
+                length_pred = length_pred.reshape(-1).float()
+                length_target = length_target.reshape(-1).float()
+                length_mask_t = length_mask_t.reshape(-1)
+
+                if length_mask_t.any():
+                    err = (length_pred - length_target).abs()[length_mask_t]
+                    metrics["length_mae"] = float(err.mean().item())
+                    metrics["length_rmse"] = float(
+                        ((length_pred - length_target) ** 2)[length_mask_t].mean().sqrt().item()
+                    )
+
+                    pred_round = torch.round(length_pred).clamp(min=0.0)
+                    diff_round = (pred_round - length_target).abs()[length_mask_t]
+                    metrics["length_acc_within_1"] = float(
+                        (diff_round <= 1.0).float().mean().item()
+                    )
 
             return metrics
         except Exception as e:
