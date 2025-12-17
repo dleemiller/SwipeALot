@@ -11,7 +11,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
 )
 
-from .configuration_swipe import SwipeCrossEncoderConfig, SwipeTransformerConfig
+from .configuration_swipe import SwipeTransformerConfig
 
 
 @dataclass
@@ -137,23 +137,26 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
     def forward(
         self,
-        path_coords: torch.Tensor,
         input_ids: torch.Tensor,
+        path_coords: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        labels: torch.Tensor | None = None,
+        labels: torch.Tensor | dict | None = None,
         return_dict: bool | None = None,
         output_hidden_states: bool | None = None,
+        **kwargs,
     ):
         """
         Forward pass of the model.
 
         Args:
-            path_coords (torch.Tensor): Path coordinates [batch, path_len, 3]
             input_ids (torch.Tensor): Character token IDs [batch, char_len]
+            path_coords (torch.Tensor): Path coordinates [batch, path_len, 3]
             attention_mask (torch.Tensor, optional): Attention mask [batch, seq_len]
-            labels (torch.Tensor, optional): Labels for loss calculation [batch, char_len]
+            labels (torch.Tensor or dict, optional): Labels for loss calculation
+                Can be tensor [batch, char_len] or dict with keys like char_labels, path_labels
             return_dict (bool, optional): Whether to return ModelOutput object
             output_hidden_states (bool, optional): Whether to output hidden states
+            **kwargs: Additional arguments (for compatibility)
 
         Returns:
             SwipeTransformerOutput or tuple: Model outputs with:
@@ -165,6 +168,17 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
                 - pooler_output: SEP token embeddings [batch, d_model] for similarity/embedding tasks
                 - hidden_states: Tuple of hidden states (if output_hidden_states=True)
         """
+        # Validate required inputs
+        if input_ids is None or path_coords is None:
+            raise ValueError("Both input_ids and path_coords are required")
+
+        # Extract labels if dict (used by custom trainers)
+        if isinstance(labels, dict):
+            char_labels = labels.get("char_labels")
+            # Can handle other label types in the future (path_labels, etc.)
+        else:
+            char_labels = labels
+
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = path_coords.shape[0]
@@ -212,14 +226,14 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         # Compute loss if labels provided
         loss = None
-        if labels is not None:
+        if char_labels is not None:
             loss_fct = nn.CrossEntropyLoss(ignore_index=self.config.pad_token_id)
             # Extract character positions from hidden states
             # Sequence is: [CLS] + path + [SEP] + chars
             char_start = 1 + path_len + 1  # After [CLS], path, and [SEP]
-            char_hidden = hidden_states[:, char_start : char_start + labels.shape[1], :]
+            char_hidden = hidden_states[:, char_start : char_start + char_labels.shape[1], :]
             char_pred = self.char_head(char_hidden)
-            loss = loss_fct(char_pred.reshape(-1, self.config.vocab_size), labels.reshape(-1))
+            loss = loss_fct(char_pred.reshape(-1, self.config.vocab_size), char_labels.reshape(-1))
 
         if not return_dict:
             output = (hidden_states, char_logits, length_logits, pooler_output)
@@ -237,147 +251,6 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
             hidden_states=(hidden_states,) if output_hidden_states else None,
         )
 
-
-class SwipeCrossEncoderForSequenceClassification(SwipeTransformerPreTrainedModel):
-    """
-    HuggingFace-compatible cross-encoder for sequence classification.
-
-    This model is designed for similarity scoring between swipe paths and words.
-    It extracts the SEP token embedding and passes it through a classification head.
-
-    Args:
-        config (SwipeCrossEncoderConfig): Model configuration
-    """
-
-    config_class = SwipeCrossEncoderConfig
-    base_model_prefix = "swipe_cross_encoder"
-
-    def __init__(self, config: SwipeCrossEncoderConfig):
-        super().__init__(config)
-        self.config = config
-        self.num_labels = config.num_labels
-
-        # Import existing components
-        from ..models.embeddings import MixedEmbedding
-        from ..models.heads import ClassificationHead
-
-        # Embeddings
-        self.embeddings = MixedEmbedding(
-            vocab_size=config.vocab_size,
-            max_path_len=config.max_path_len,
-            max_char_len=config.max_char_len,
-            d_model=config.d_model,
-            dropout=config.dropout,
-        )
-
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=config.d_model,
-            nhead=config.n_heads,
-            dim_feedforward=config.d_ff,
-            dropout=config.dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,  # Pre-LayerNorm
-        )
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=config.n_layers,
-            enable_nested_tensor=False,
-        )
-
-        # Classification head
-        self.classifier = ClassificationHead(
-            d_model=config.d_model,
-            num_labels=config.num_labels,
-        )
-
-        # Initialize weights
-        self.post_init()
-
-    def forward(
-        self,
-        path_coords: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        labels: torch.Tensor | None = None,
-        return_dict: bool | None = None,
-    ):
-        """
-        Forward pass for cross-encoder.
-
-        Args:
-            path_coords (torch.Tensor): Path coordinates [batch, path_len, 3]
-            input_ids (torch.Tensor): Character token IDs [batch, char_len]
-            attention_mask (torch.Tensor, optional): Attention mask [batch, seq_len]
-            labels (torch.Tensor, optional): Labels for loss calculation [batch, num_labels]
-            return_dict (bool, optional): Whether to return ModelOutput object
-
-        Returns:
-            SequenceClassifierOutput or tuple: Model outputs with logits and optional loss
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        batch_size = path_coords.shape[0]
-        device = path_coords.device
-
-        # Create [CLS] and [SEP] tokens
-        cls_token = torch.full(
-            (batch_size, 1), fill_value=self.config.cls_token_id, dtype=torch.long, device=device
-        )
-        sep_token = torch.full(
-            (batch_size, 1), fill_value=self.config.sep_token_id, dtype=torch.long, device=device
-        )
-
-        # Get embeddings
-        embeddings = self.embeddings(path_coords, input_ids, cls_token, sep_token)
-
-        # Prepare attention mask
-        if attention_mask is not None:
-            src_key_padding_mask = attention_mask == 0
-        else:
-            src_key_padding_mask = None
-
-        # Encode (batch_first=True is set in TransformerEncoderLayer)
-        hidden_states = self.encoder(embeddings, src_key_padding_mask=src_key_padding_mask)
-
-        # Extract SEP token embedding
-        # SEP is at position 1 + path_len
-        path_len = path_coords.shape[1]
-        sep_position = 1 + path_len
-        sep_embedding = hidden_states[:, sep_position, :]  # [batch, d_model]
-
-        # Classification
-        logits = self.classifier(sep_embedding)  # [batch, num_labels]
-
-        # Compute loss if labels provided
-        loss = None
-        if labels is not None:
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                else:
-                    self.config.problem_type = "single_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = nn.MSELoss()
-                if self.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-
-        if not return_dict:
-            output = (logits,) + (hidden_states,)
-            return ((loss,) + output) if loss is not None else output
-
-        return SequenceClassifierOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=(hidden_states,),
-        )
 
 
 class SwipeModel(SwipeTransformerPreTrainedModel):
@@ -411,7 +284,7 @@ class SwipeModel(SwipeTransformerPreTrainedModel):
         ```
 
     Args:
-        config (SwipeTransformerConfig or SwipeCrossEncoderConfig): Model configuration
+        config (SwipeTransformerConfig): Model configuration
     """
 
     def __init__(self, config):

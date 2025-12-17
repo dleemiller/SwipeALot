@@ -56,36 +56,14 @@ class DataConfig:
 
 @dataclass
 class TrainingConfig:
-    """Training configuration."""
+    """Training configuration with custom parameters and HuggingFace TrainingArguments passthrough."""
 
-    # Optimization
-    learning_rate: float = 2e-4
-    min_learning_rate: float = 1e-5  # Minimum LR for cosine annealing
-    weight_decay: float = 0.01
-    num_epochs: int = 10
-    warmup_steps: int = 1000
-
-    # Loss weights
+    # Custom loss weights
     char_loss_weight: float = 1.0
     path_loss_weight: float = 0.1
     length_loss_weight: float = 0.1  # Auxiliary CLS length prediction
 
-    # Logging and checkpointing
-    log_interval: int = 100
-    val_interval: int = 1000  # Run validation every N steps
-    save_interval: int = 1  # Save checkpoint every N epochs
-    keep_n_checkpoints: int = 2  # Keep best + N most recent checkpoints
-    log_dir: str = "logs"
-    checkpoint_dir: str = "checkpoints"
-
-    # Device
-    device: str = "cuda"
-
-    # Mixed precision training
-    use_amp: bool = True
-    amp_dtype: str = "bfloat16"  # "bfloat16" or "float16"
-
-    # Character loss shaping
+    # Custom loss settings
     use_focal_loss: bool = False
     focal_gamma: float = 0.0
     use_char_freq_weights: bool = False
@@ -94,93 +72,17 @@ class TrainingConfig:
     # Pairwise masking + contrastive objective
     use_pairwise_masking: bool = False
     pairwise_modality_prob: float = 0.2  # Probability of using modality-based masking (vs inverted)
-    pairwise_zero_text_attention_prob: float = (
-        0.5  # Probability of zeroing text attention (for length-only training)
-    )
+    pairwise_zero_attention_prob: float = 0.5  # Probability of zeroing attention in modality mode
     contrastive_weight: float = 0.0
     contrastive_temperature: float = 0.1
 
-    # matryoshka settings
+    # Matryoshka settings
     matryoshka_dims: list[int] | None = None
     matryoshka_weights: list[float] | None = None
 
-
-@dataclass
-class CrossEncoderDataConfig:
-    """Data configuration for cross-encoder training."""
-
-    # Dataset
-    dataset_name: str = "futo-org/swipe.futo.org"
-    train_split: str = "train"
-    val_split: str = "validation"
-    test_split: str = "test"
-
-    # Negative mining
-    negative_pool_path: str | None = None
-    num_negatives: int = 3  # Number of negatives per positive (1:3 ratio)
-    difficulty_sampling: bool = True  # Sample negatives by difficulty score
-
-    # Sequence lengths
-    max_path_len: int = 64
-    max_word_len: int = 48
-
-    # DataLoader
-    batch_size: int = 256
-    num_workers: int = 4
-
-
-@dataclass
-class CrossEncoderTrainingConfig:
-    """Training configuration for cross-encoder."""
-
-    # Pretrained model
-    base_checkpoint: str | None = None  # Path to pretrained encoder checkpoint
-
-    # Encoder freezing
-    freeze_encoder: bool = True  # Freeze encoder during training
-
-    # Optimization
-    head_learning_rate: float = 1e-4  # LR for classification head
-    encoder_learning_rate: float = 5e-6  # LR for encoder (when unfrozen)
-    min_learning_rate: float = 5e-6  # Minimum LR for cosine annealing (10% of head LR)
-    weight_decay: float = 0.01
-    num_epochs: int = 10
-    warmup_steps: int = 500
-
-    # Loss
-    mnr_scale: float = 10.0  # Temperature scaling for MNR loss
-
-    # Logging and checkpointing
-    log_interval: int = 100
-    val_interval: int = 500
-    save_interval: int = 1
-    keep_n_checkpoints: int = 2
-    log_dir: str = "logs/cross_encoder"
-    checkpoint_dir: str = "checkpoints/cross_encoder"
-
-    # Device
-    device: str = "cuda"
-
-    # Mixed precision
-    use_amp: bool = True
-    amp_dtype: str = "bfloat16"
-
-
-@dataclass
-class CrossEncoderConfig:
-    """Complete configuration for cross-encoder training."""
-
-    model: ModelConfig = field(default_factory=ModelConfig)
-    data: CrossEncoderDataConfig = field(default_factory=CrossEncoderDataConfig)
-    training: CrossEncoderTrainingConfig = field(default_factory=CrossEncoderTrainingConfig)
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "CrossEncoderConfig":
-        """Load configuration from YAML file."""
-        yaml_conf = OmegaConf.load(path)
-        structured_conf = OmegaConf.structured(cls)
-        merged = OmegaConf.merge(structured_conf, yaml_conf)
-        return OmegaConf.to_object(merged)
+    # HuggingFace TrainingArguments (passthrough for standard parameters)
+    # This allows any standard HF argument to be passed without explicit definition
+    training_args: dict[str, Any] = field(default_factory=dict)
 
     def to_yaml(self, path: str) -> None:
         """Save configuration to YAML file."""

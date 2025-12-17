@@ -1,4 +1,8 @@
-"""Model components for SwipeTransformer."""
+"""Model components for SwipeTransformer.
+
+Note: The native PyTorch SwipeTransformerModel has been archived.
+Use the HuggingFace version from swipealot.huggingface instead.
+"""
 
 from .embeddings import (
     CharacterEmbedding,
@@ -8,7 +12,6 @@ from .embeddings import (
     TypeEmbedding,
 )
 from .heads import CharacterPredictionHead, PathPredictionHead
-from .transformer import SwipeTransformerModel
 
 __all__ = [
     "PathEmbedding",
@@ -18,5 +21,4 @@ __all__ = [
     "MixedEmbedding",
     "CharacterPredictionHead",
     "PathPredictionHead",
-    "SwipeTransformerModel",
 ]

@@ -1,10 +1,21 @@
-"""Main training script for swipe keyboard model."""
+"""Main training script for swipe keyboard model using HuggingFace Trainer."""
 
 import argparse
+import logging
 from datetime import datetime
 
 import torch
-from torch.utils.data import DataLoader
+from rich.logging import RichHandler
+from transformers import TrainingArguments
+
+# Configure logging with rich handler
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True, markup=True)],
+)
+logger = logging.getLogger(__name__)
 
 from swipealot.config import Config
 from swipealot.data import (
@@ -14,8 +25,9 @@ from swipealot.data import (
     ValidationCollator,
     vocab_hash,
 )
-from swipealot.models import SwipeTransformerModel
-from swipealot.training import SwipeLoss, SwipeTrainer
+from swipealot.huggingface import SwipeTransformerConfig, SwipeTransformerModel
+from swipealot.training import SwipeLoss
+from swipealot.training.trainer import SwipeTrainer, create_compute_metrics_fn
 
 
 def main():
@@ -25,12 +37,6 @@ def main():
     )
     parser.add_argument(
         "--resume", type=str, default=None, help="Path to checkpoint to resume from"
-    )
-    parser.add_argument(
-        "--load-weights",
-        type=str,
-        default=None,
-        help="Path to checkpoint to load weights from (for fine-tuning, starts fresh training)",
     )
     parser.add_argument(
         "--debug", action="store_true", help="Use small subset of data for debugging"
@@ -44,7 +50,7 @@ def main():
     args = parser.parse_args()
 
     # Load configuration
-    print(f"Loading config from: {args.config}")
+    logger.info(f"Loading config from: [cyan]{args.config}[/cyan]")
     config = Config.from_yaml(args.config)
 
     # Create unique run name with timestamp
@@ -52,19 +58,24 @@ def main():
     config_name = args.config.split("/")[-1].replace(".yaml", "")
     run_name = f"{config_name}_{timestamp}"
 
-    # Update log and checkpoint directories with unique run name
-    config.training.log_dir = f"{config.training.log_dir}/{run_name}"
-    config.training.checkpoint_dir = f"{config.training.checkpoint_dir}/{run_name}"
-    print(f"Run name: {run_name}")
-    print(f"Logs: {config.training.log_dir}")
-    print(f"Checkpoints: {config.training.checkpoint_dir}")
+    # Get base directories from training_args or use defaults
+    base_output_dir = config.training.training_args.get("output_dir", "checkpoints")
+    base_log_dir = config.training.training_args.get("logging_dir", "logs")
+
+    # Update with unique run name
+    output_dir = f"{base_output_dir}/{run_name}"
+    log_dir = f"{base_log_dir}/{run_name}"
+
+    logger.info(f"Run name: [yellow]{run_name}[/yellow]")
+    logger.info(f"Logs: [blue]{log_dir}[/blue]")
+    logger.info(f"Checkpoints: [blue]{output_dir}[/blue]")
 
     # Set device
-    device = torch.device(config.training.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: [green]{device}[/green]")
 
     # Build tokenizer from training data
-    print("\nBuilding tokenizer...")
+    logger.info("Building tokenizer...")
     # Load small sample to build vocabulary
     sample_dataset = SwipeDataset(
         split=config.data.train_split,
@@ -75,7 +86,7 @@ def main():
     )
     tokenizer = sample_dataset.tokenizer
     config.model.vocab_size = tokenizer.vocab_size
-    print(f"Vocabulary size: {tokenizer.vocab_size}")
+    logger.info(f"Vocabulary size: [magenta]{tokenizer.vocab_size}[/magenta]")
 
     # Optional inverse-log character frequency weights (pre-computed only)
     char_freq_weights = None
@@ -87,7 +98,7 @@ def main():
                 "Run scripts/compute_char_weights.py first."
             )
 
-        print(f"\nLoading precomputed character weights from: {weights_path}")
+        logger.info(f"Loading precomputed character weights from: [cyan]{weights_path}[/cyan]")
         loaded = torch.load(weights_path, map_location=device, weights_only=False)
         if isinstance(loaded, dict) and "weights" in loaded:
             char_freq_weights = loaded["weights"]
@@ -114,14 +125,14 @@ def main():
                 f"Loaded weights vocab ({char_freq_weights.shape[0]}) != tokenizer vocab ({tokenizer.vocab_size})"
             )
         char_freq_weights = char_freq_weights.to(device)
-        print(
+        logger.info(
             f"Loaded weights tensor shape: {tuple(char_freq_weights.shape)} (mean {char_freq_weights.mean():.4f})"
         )
     else:
-        print("\nCharacter frequency weights: disabled (use_char_freq_weights=False)")
+        logger.info("Character frequency weights: [dim]disabled (use_char_freq_weights=False)[/dim]")
 
     # Create datasets
-    print("\nLoading datasets...")
+    logger.info("Loading datasets...")
     max_samples = 1000 if args.debug else None
 
     train_dataset = SwipeDataset(
@@ -142,23 +153,26 @@ def main():
         max_samples=max_samples // 10 if max_samples else 1000,  # Use 1k samples for validation
     )
 
-    # Create data loaders
-    print("\nCreating data loaders...")
+    logger.info(f"Train samples: [green]{len(train_dataset):,}[/green]")
+    logger.info(f"Val samples: [green]{len(val_dataset):,}[/green]")
+
+    # Create collators
+    logger.info("Creating data collators...")
     if config.training.use_pairwise_masking:
         train_collator = PairwiseMaskedCollator(
             tokenizer=tokenizer,
             mask_path=config.data.mask_path,
             modality_prob=config.training.pairwise_modality_prob,
-            zero_text_attention_prob=config.training.pairwise_zero_text_attention_prob,
+            zero_attention_prob=config.training.pairwise_zero_attention_prob,
         )
         # Use unmasked validation for true accuracy metrics
         val_collator = ValidationCollator(tokenizer=tokenizer)
         modality_pct = int(config.training.pairwise_modality_prob * 100)
         inverted_pct = 100 - modality_pct
-        print(
-            f"Using pairwise masking for training ({inverted_pct}% inverted, {modality_pct}% modality)"
+        logger.info(
+            f"Using pairwise masking for training ([yellow]{inverted_pct}%[/yellow] inverted, [yellow]{modality_pct}%[/yellow] modality)"
         )
-        print("Using unmasked evaluation for validation")
+        logger.info("Using unmasked evaluation for validation")
     else:
         train_collator = MaskedCollator(
             tokenizer=tokenizer,
@@ -168,114 +182,40 @@ def main():
             mask_vocab_only=config.data.mask_vocab_only,
         )
         val_collator = train_collator
+        logger.info("Using standard masked collator")
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=True,
-        num_workers=config.data.num_workers,
-        collate_fn=train_collator,
-        pin_memory=True,
+    # Create HuggingFace model configuration
+    logger.info("Creating HuggingFace model configuration...")
+    hf_config = SwipeTransformerConfig(
+        vocab_size=config.model.vocab_size,
+        max_path_len=config.data.max_path_len,
+        max_char_len=config.data.max_char_len,
+        d_model=config.model.d_model,
+        n_heads=config.model.n_heads,
+        n_layers=config.model.n_layers,
+        d_ff=config.model.d_ff,
+        dropout=config.model.dropout,
+        predict_path=config.model.predict_path,
+        pad_token_id=tokenizer.pad_token_id,
+        cls_token_id=tokenizer.cls_token_id,
+        sep_token_id=tokenizer.sep_token_id,
+        mask_token_id=tokenizer.mask_token_id,
+        unk_token_id=tokenizer.unk_token_id,
+        eos_token_id=tokenizer.eos_token_id,
     )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=False,
-        num_workers=config.data.num_workers,
-        collate_fn=val_collator,
-        pin_memory=True,
-    )
-
-    print(f"Train batches: {len(train_loader)}")
-    print(f"Val batches: {len(val_loader)}")
 
     # Create model
-    print("\nCreating model...")
-    model = SwipeTransformerModel(config.model)
-    model.to(device)
+    logger.info("Creating HuggingFace model...")
+    model = SwipeTransformerModel(hf_config)
 
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {num_params:,}")
-    print(f"Trainable parameters: {num_trainable:,}")
-
-    # Create optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay,
-    )
-
-    # Create learning rate scheduler with cosine annealing and warmup
-    import math
-
-    from torch.optim.lr_scheduler import LambdaLR
-
-    # Calculate total training steps
-    total_steps = len(train_loader) * config.training.num_epochs
-
-    def lr_lambda(current_step: int):
-        """Linear warmup then cosine annealing to min_lr."""
-        if current_step < config.training.warmup_steps:
-            # Linear warmup
-            return float(current_step) / float(max(1, config.training.warmup_steps))
-        # Cosine annealing from 1.0 to min_lr_ratio
-        progress = float(current_step - config.training.warmup_steps) / float(
-            max(1, total_steps - config.training.warmup_steps)
-        )
-        min_lr_ratio = config.training.min_learning_rate / config.training.learning_rate
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
-
-    scheduler = LambdaLR(optimizer, lr_lambda)
-    print(
-        f"Learning rate schedule: warmup for {config.training.warmup_steps} steps, then cosine annealing from {config.training.learning_rate:.2e} to {config.training.min_learning_rate:.2e} over {total_steps} total steps"
-    )
-
-    # Resume from checkpoint if specified
-    start_epoch = 0
-    resume_metrics = None
-    resume_global_step = None
-    resume_scaler_state = None
-
-    if args.resume and args.load_weights:
-        raise ValueError(
-            "Cannot specify both --resume and --load-weights. Use --resume to continue training, or --load-weights for fine-tuning."
-        )
-
-    if args.resume:
-        print(f"\nLoading checkpoint from: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        resume_metrics = checkpoint.get("metrics")
-        resume_global_step = checkpoint.get("global_step")
-        resume_scaler_state = checkpoint.get("scaler_state_dict")
-        start_epoch = checkpoint.get("epoch", 0) + 1
-        print(f"Resuming from epoch {start_epoch}")
-
-    elif args.load_weights:
-        print(f"\nLoading model weights for fine-tuning from: {args.load_weights}")
-        checkpoint = torch.load(args.load_weights, map_location=device, weights_only=False)
-        # Use strict=False to allow loading when model architecture differs (e.g., missing heads)
-        missing_keys, unexpected_keys = model.load_state_dict(
-            checkpoint["model_state_dict"], strict=False
-        )
-        if unexpected_keys:
-            print(
-                f"Ignored {len(unexpected_keys)} unexpected keys (likely disabled heads): {unexpected_keys[:3]}..."
-            )
-        if missing_keys:
-            print(f"Warning: {len(missing_keys)} missing keys: {missing_keys[:3]}...")
-        print(
-            "Loaded pretrained weights. Starting fresh training from epoch 0 with new optimizer/scheduler."
-        )
+    logger.info(f"Total parameters: [cyan]{num_params:,}[/cyan]")
+    logger.info(f"Trainable parameters: [cyan]{num_trainable:,}[/cyan]")
 
     # Create loss function
+    logger.info("Creating loss function...")
     loss_fn = SwipeLoss(
         char_weight=config.training.char_loss_weight,
         path_weight=config.training.path_loss_weight,
@@ -288,33 +228,107 @@ def main():
         matryoshka_weights=config.training.matryoshka_weights,
     )
 
-    # Create trainer
-    print("\nInitializing trainer...")
+    # Create compute_metrics function
+    compute_metrics = create_compute_metrics_fn(tokenizer)
+
+    # Create TrainingArguments from config
+    logger.info("Creating training arguments...")
+
+    # Start with training_args from config (this contains all standard HF parameters)
+    training_args_dict = config.training.training_args.copy()
+
+    # Override with run-specific settings
+    training_args_dict["output_dir"] = output_dir
+    training_args_dict["logging_dir"] = log_dir
+
+    # Override batch sizes if specified in data config (for backward compatibility)
+    if config.data.batch_size:
+        training_args_dict.setdefault("per_device_train_batch_size", config.data.batch_size)
+        training_args_dict.setdefault("per_device_eval_batch_size", config.data.batch_size)
+
+    # Override num_workers if specified in data config
+    if config.data.num_workers:
+        training_args_dict.setdefault("dataloader_num_workers", config.data.num_workers)
+
+    # Create TrainingArguments instance
+    training_args = TrainingArguments(**training_args_dict)
+
+    # Calculate total training steps for logging
+    batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+    total_train_steps = (len(train_dataset) // batch_size) * training_args.num_train_epochs
+    warmup_steps = training_args_dict.get("warmup_steps", 0)
+    warmup_ratio = training_args.warmup_ratio if warmup_steps == 0 else (warmup_steps / total_train_steps if total_train_steps > 0 else 0)
+
+    logger.info(f"Training for [yellow]{training_args.num_train_epochs}[/yellow] epochs")
+    logger.info(f"Total training steps: ~[yellow]{total_train_steps:,}[/yellow]")
+    logger.info(f"Warmup steps: [yellow]{int(warmup_ratio * total_train_steps)}[/yellow] ([dim]{warmup_ratio:.2%} of total[/dim])")
+    logger.info(f"Learning rate: [yellow]{training_args.learning_rate:.2e}[/yellow]")
+    logger.info(f"Mixed precision: bf16={training_args.bf16}, fp16={training_args.fp16}")
+    logger.info(f"Reporting to: [cyan]{', '.join(training_args.report_to)}[/cyan]")
+
+    # Create Trainer
+    logger.info("Initializing SwipeTrainer...")
     trainer = SwipeTrainer(
         model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        optimizer=optimizer,
-        scheduler=scheduler,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=train_collator,
+        eval_collator=val_collator,  # Use separate collator for evaluation
+        compute_metrics=compute_metrics,
         loss_fn=loss_fn,
-        device=device,
-        config=config,  # Pass full Config object, not just config.training
-        tokenizer=tokenizer,
     )
 
-    # Restore trainer state (global step, scaler, best accuracy) when resuming
+    # Resume from checkpoint if specified
+    resume_from_checkpoint = None
     if args.resume:
-        if resume_global_step is not None:
-            trainer.global_step = resume_global_step
-        if resume_metrics and "char_accuracy" in resume_metrics:
-            trainer.best_accuracy = float(resume_metrics["char_accuracy"])
-        if trainer.scaler and resume_scaler_state is not None:
-            trainer.scaler.load_state_dict(resume_scaler_state)
+        logger.info(f"Resuming from checkpoint: [cyan]{args.resume}[/cyan]")
+        resume_from_checkpoint = args.resume
 
     # Train
-    print("\nStarting training...")
-    print("=" * 60)
-    trainer.train(num_epochs=config.training.num_epochs, start_epoch=start_epoch)
+    logger.info("[bold green]Starting training...[/bold green]")
+    logger.info("=" * 60)
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+    # Save final model
+    logger.info("Saving final model...")
+    final_path = output_dir + "/final"
+    trainer.save_model(final_path)
+
+    # Prepare checkpoint for HuggingFace Hub
+    from pathlib import Path
+    from swipealot.training.checkpoint_utils import prepare_checkpoint_for_hub
+
+    logger.info("Preparing checkpoint for HuggingFace Hub...")
+    prepare_checkpoint_for_hub(final_path)
+    logger.info("  [green]✓[/green] Copied modeling files and dependencies")
+    logger.info("  [green]✓[/green] Fixed imports for standalone loading")
+    logger.info("  [green]✓[/green] Updated config.json with auto_map")
+
+    # Save tokenizer and processor (auto_map is added automatically in save_pretrained)
+    from swipealot.huggingface import SwipeTokenizer, SwipeProcessor
+
+    hf_tokenizer = SwipeTokenizer()
+    hf_tokenizer._tokenizer = tokenizer
+    hf_tokenizer.save_pretrained(final_path)
+    logger.info("  [green]✓[/green] Saved tokenizer with auto_map")
+
+    hf_processor = SwipeProcessor(
+        tokenizer=hf_tokenizer,
+        max_path_len=config.data.max_path_len,
+        max_char_len=config.data.max_char_len,
+    )
+    hf_processor.save_pretrained(final_path)
+    logger.info("  [green]✓[/green] Saved processor with auto_map")
+
+    logger.info("=" * 60)
+    logger.info("[bold green]✅ Training complete![/bold green]")
+    logger.info(f"[bold green]✅[/bold green] Model saved to: [cyan]{output_dir}/final[/cyan]")
+    logger.info("[bold green]✅[/bold green] Model is HuggingFace-compatible - no conversion needed!")
+    logger.info("\n[bold]To load the model:[/bold]")
+    logger.info("  [dim]from transformers import AutoModel, AutoProcessor[/dim]")
+    logger.info(f"  [dim]model = AutoModel.from_pretrained('{output_dir}/final', trust_remote_code=True)[/dim]")
+    logger.info(f"  [dim]processor = AutoProcessor.from_pretrained('{output_dir}/final', trust_remote_code=True)[/dim]")
 
 
 if __name__ == "__main__":

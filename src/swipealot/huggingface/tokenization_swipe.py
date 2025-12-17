@@ -154,6 +154,43 @@ class SwipeTokenizer(PreTrainedTokenizer):
         filtered = [t for t in tokens if t not in special_tokens]
         return "".join(filtered)
 
+    def save_pretrained(
+        self,
+        save_directory,
+        legacy_format=None,
+        filename_prefix=None,
+        push_to_hub=False,
+        **kwargs,
+    ):
+        """
+        Save the tokenizer to a directory, ensuring auto_map is included.
+        """
+        # Call parent save_pretrained
+        result = super().save_pretrained(
+            save_directory,
+            legacy_format=legacy_format,
+            filename_prefix=filename_prefix,
+            push_to_hub=push_to_hub,
+            **kwargs,
+        )
+
+        # Add auto_map to tokenizer_config.json for AutoTokenizer compatibility
+        from pathlib import Path
+
+        tokenizer_config_path = Path(save_directory) / "tokenizer_config.json"
+        if tokenizer_config_path.exists():
+            with open(tokenizer_config_path, "r") as f:
+                config = json.load(f)
+
+            config["auto_map"] = {
+                "AutoTokenizer": ["tokenization_swipe.SwipeTokenizer", None]
+            }
+
+            with open(tokenizer_config_path, "w") as f:
+                json.dump(config, f, indent=2)
+
+        return result
+
     def save_vocabulary(self, save_directory: str, filename_prefix: str | None = None) -> tuple:
         """
         Save the tokenizer vocabulary to a directory.

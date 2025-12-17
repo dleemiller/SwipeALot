@@ -4,34 +4,32 @@ version = "0.1.0"
 description = "Swipe keyboard transformer model using multimodal embeddings"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
-
-[project.scripts]
-train = "swipealot.scripts.train:main"
-evaluate = "swipealot.scripts.evaluate:main"
-attention-map = "swipealot.scripts.attention_map:main"
-convert-hf = "swipealot.scripts.convert_hf:main"
-test-hf = "swipealot.scripts.test_hf:main"
-
-[project.optional-dependencies]
-cu128 = [
-    "torch>=2.8.0",
-    "torchvision>=0.23.0",
+dependencies = [
     "transformers>=4.57.1",
     "datasets>=4.0.0",
     "huggingface_hub>=0.34.4",
     "tqdm>=4.66.4",
     "rich>=14.2.0",
     "scikit-learn>=1.7.1",
-    "tensorboard>=2.20.0",  # For logging and visualization
-    "matplotlib>=3.10.7",  # For plots
-    "seaborn>=0.13.2",  # For heatmaps
-    "pyyaml>=6.0",  # For config files
-    "numpy>=1.26.0",  # For data processing
-    # New dependencies for library simplification
-    "torchmetrics>=1.0.0",  # For metrics
-    "omegaconf>=2.3.0",  # For structured config validation
-    "lightning>=2.0.0",  # For checkpoint management
+    "tensorboard>=2.20.0",
+    "matplotlib>=3.10.7",
+    "seaborn>=0.13.2",
+    "pyyaml>=6.0",
+    "numpy>=1.26.0",
+    "torchmetrics>=1.0.0",
+    "omegaconf>=2.3.0",
+    "accelerate>=0.26.0",
+]
+
+[project.scripts]
+train = "swipealot.scripts.train:main"
+evaluate = "swipealot.scripts.evaluate:main"
+attention-map = "swipealot.scripts.attention_map:main"
+validate = "swipealot.scripts.validate:main"
+
+[project.optional-dependencies]
+cu128 = [
+    "torch>=2.8.0",
 ]
 dev = [
     "pytest>=8.3.3",
@@ -62,6 +60,14 @@ ignore = [
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Exclude archive and build directories from test collection
+norecursedirs = ["archive", ".git", ".venv", "build", "dist", "__pycache__"]
 
 [build-system]
 requires = ["hatchling"]

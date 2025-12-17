@@ -1,430 +1,221 @@
-"""Trainer for swipe keyboard model."""
+"""Minimal HuggingFace Trainer subclass for SwipeALot with custom loss."""
 
-import os
-from pathlib import Path
+import logging
 
 import torch
-import torch.nn as nn
-from lightning.pytorch.callbacks import ModelCheckpoint
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+from transformers import Trainer
 
-from swipealot.utils import batch_to_device, extract_character_logits
-
-from .loss import SwipeLoss
 from .metrics import CharacterAccuracy, WordAccuracy
 
+logger = logging.getLogger(__name__)
 
-class SwipeTrainer:
-    """Trainer for swipe keyboard model."""
 
-    def __init__(
-        self,
-        model: nn.Module,
-        train_loader,
-        val_loader,
-        optimizer,
-        loss_fn: SwipeLoss,
-        device: torch.device,
-        config,
-        tokenizer=None,
-        scheduler=None,
-    ):
+class SwipeTrainer(Trainer):
+    """
+    Minimal trainer for SwipeALot with custom loss computation.
+
+    This trainer subclass only overrides compute_loss() to use SwipeLoss
+    instead of the default CrossEntropyLoss. Everything else uses the
+    standard HuggingFace Trainer functionality.
+    """
+
+    def __init__(self, loss_fn=None, eval_collator=None, **kwargs):
         """
-        Initialize trainer.
+        Initialize SwipeTrainer.
+
+        Args:
+            loss_fn: SwipeLoss instance for computing loss
+            eval_collator: Optional separate collator for evaluation
+            **kwargs: All other arguments passed to transformers.Trainer
+        """
+        super().__init__(**kwargs)
+        self.loss_fn = loss_fn
+        self.eval_collator = eval_collator
+        self._train_collator = self.data_collator
+
+    def _save(self, output_dir, state_dict=None):
+        """
+        Save model checkpoint with remote code files for AutoModel compatibility.
+        """
+        from .checkpoint_utils import prepare_checkpoint_for_hub
+
+        # Save model and config
+        self.model.save_pretrained(
+            output_dir,
+            state_dict=state_dict,
+            safe_serialization=self.args.save_safetensors,
+        )
+
+        # Prepare checkpoint for HuggingFace Hub
+        # Copies modeling files, fixes imports, adds auto_map
+        prepare_checkpoint_for_hub(output_dir)
+
+        # Save tokenizer and processor for hub-ready checkpoints
+        try:
+            from swipealot.huggingface import SwipeTokenizer, SwipeProcessor
+
+            # Get CharacterTokenizer from data_collator
+            if hasattr(self.data_collator, 'tokenizer'):
+                char_tokenizer = self.data_collator.tokenizer
+
+                # Wrap in SwipeTokenizer
+                hf_tokenizer = SwipeTokenizer()
+                hf_tokenizer._tokenizer = char_tokenizer
+                hf_tokenizer.save_pretrained(output_dir)
+
+                # Save processor (auto_map is added automatically in save_pretrained)
+                hf_processor = SwipeProcessor(
+                    tokenizer=hf_tokenizer,
+                    max_path_len=self.model.config.max_path_len,
+                    max_char_len=self.model.config.max_char_len,
+                )
+                hf_processor.save_pretrained(output_dir)
+        except Exception as e:
+            # Don't fail checkpoint save if tokenizer/processor save fails
+            logger.warning(f"Failed to save tokenizer/processor: {e}")
+
+    def get_eval_dataloader(self, eval_dataset=None):
+        """
+        Get evaluation dataloader, using eval_collator if provided.
+        """
+        if self.eval_collator is not None:
+            # Temporarily swap collators
+            original_collator = self.data_collator
+            self.data_collator = self.eval_collator
+            dataloader = super().get_eval_dataloader(eval_dataset)
+            self.data_collator = original_collator
+            return dataloader
+        return super().get_eval_dataloader(eval_dataset)
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """
+        Perform an evaluation step, extracting predictions for compute_metrics.
+        """
+        import torch
+
+        # Forward pass
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        # Extract loss if available
+        loss = outputs.loss if hasattr(outputs, "loss") and outputs.loss is not None else None
+
+        if prediction_loss_only:
+            return (loss, None, None)
+
+        # Extract predictions - we want char_logits for character accuracy
+        if hasattr(outputs, "char_logits"):
+            predictions = outputs.char_logits
+        else:
+            predictions = outputs.get("char_logits") if isinstance(outputs, dict) else None
+
+        # Extract labels
+        labels = inputs.get("char_labels") if isinstance(inputs, dict) else None
+
+        # Move to CPU for metrics computation
+        if predictions is not None:
+            predictions = predictions.detach().cpu()
+        if labels is not None:
+            labels = labels.detach().cpu()
+
+        return (loss, predictions, labels)
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        Compute loss using SwipeLoss.
 
         Args:
             model: SwipeTransformerModel
-            train_loader: Training data loader
-            val_loader: Validation data loader
-            optimizer: Optimizer
-            loss_fn: Loss function
-            device: Device to train on
-            config: Full Config object (or TrainingConfig for backward compatibility)
-            tokenizer: Character tokenizer (optional, for word accuracy)
-            scheduler: Learning rate scheduler (optional)
-        """
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-        self.loss_fn = loss_fn
-        self.device = device
-        self.config = config
-        self.tokenizer = tokenizer
-
-        # Handle both full Config and TrainingConfig (backward compatibility)
-        if hasattr(config, "training"):
-            # Full Config object
-            train_config = config.training
-        else:
-            # Legacy TrainingConfig only
-            train_config = config
-
-        # Metrics
-        vocab_size = tokenizer.vocab_size if tokenizer else 128
-        self.char_accuracy = CharacterAccuracy(vocab_size=vocab_size, device=str(device))
-        if tokenizer:
-            self.word_accuracy = WordAccuracy(tokenizer)
-        else:
-            self.word_accuracy = None
-
-        # TensorBoard logging
-        os.makedirs(train_config.log_dir, exist_ok=True)
-        self.writer = SummaryWriter(log_dir=train_config.log_dir)
-        self.global_step = 0
-        self.best_accuracy: float | None = None
-
-        # Checkpointing with Lightning ModelCheckpoint
-        os.makedirs(train_config.checkpoint_dir, exist_ok=True)
-
-        # Create Lightning ModelCheckpoint callback for better checkpoint management
-        self.checkpoint_callback = ModelCheckpoint(
-            dirpath=train_config.checkpoint_dir,
-            filename="checkpoint_epoch_{epoch}",
-            save_top_k=train_config.keep_n_checkpoints,
-            monitor="char_accuracy",  # Monitor character accuracy
-            mode="max",  # Save checkpoints with highest accuracy
-            save_last=True,  # Always save the last checkpoint
-            verbose=True,
-        )
-
-        # Determine dtype for mixed precision
-        self.amp_dtype = None
-        if train_config.use_amp:
-            if train_config.amp_dtype == "bfloat16":
-                self.amp_dtype = torch.bfloat16
-            else:
-                self.amp_dtype = torch.float16
-
-        # Gradient scaler for mixed precision (only for float16, not bfloat16)
-        self.scaler = (
-            torch.cuda.amp.GradScaler()
-            if (train_config.use_amp and train_config.amp_dtype == "float16")
-            else None
-        )
-
-        # Store train_config for easy access
-        self.train_config = train_config
-
-    def train_epoch(self, epoch: int) -> float:
-        """
-        Train for one epoch.
-
-        Args:
-            epoch: Current epoch number
+            inputs: Dict with input_ids, path_coords, attention_mask, labels
+            return_outputs: Whether to return model outputs along with loss
+            num_items_in_batch: Number of items in batch (for newer transformers)
 
         Returns:
-            Average training loss
+            loss (torch.Tensor) or (loss, outputs) if return_outputs=True
         """
-        self.model.train()
-        epoch_losses = []
+        # Forward pass through model
+        outputs = model(**inputs)
 
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
-        for batch in pbar:
-            # Move to device
-            batch = batch_to_device(batch, self.device)
+        # Compute loss using SwipeLoss
+        losses = self.loss_fn(outputs, inputs)
+        loss = losses["total_loss"]
 
-            # Forward pass with mixed precision
-            if self.train_config.use_amp:
-                with torch.amp.autocast(device_type="cuda", dtype=self.amp_dtype):
-                    outputs = self.model(
-                        path_coords=batch["path_coords"],
-                        char_tokens=batch["char_tokens"],
-                        attention_mask=batch["attention_mask"],
-                    )
-                    losses = self.loss_fn(outputs, batch)
-                    loss = losses["total_loss"]
+        # Log individual loss components (less frequently to avoid spam)
+        if self.state.global_step % self.args.logging_steps == 0:
+            for key, value in losses.items():
+                if key != "total_loss":
+                    self.log({f"train/{key}": value.item()})
 
-                # Backward pass
-                self.optimizer.zero_grad()
-                if self.scaler:  # float16 uses gradient scaling
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:  # bfloat16 doesn't need scaling
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.optimizer.step()
-            else:
-                outputs = self.model(
-                    path_coords=batch["path_coords"],
-                    char_tokens=batch["char_tokens"],
-                    attention_mask=batch["attention_mask"],
-                )
-                losses = self.loss_fn(outputs, batch)
-                loss = losses["total_loss"]
+        return (loss, outputs) if return_outputs else loss
 
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
 
-            # Update learning rate
-            if self.scheduler:
-                self.scheduler.step()
+def create_compute_metrics_fn(tokenizer):
+    """
+    Create a compute_metrics function for the Trainer.
 
-            # Logging
-            epoch_losses.append(loss.item())
-            current_lr = self.optimizer.param_groups[0]["lr"]
-            pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{current_lr:.2e}"})
+    Args:
+        tokenizer: CharacterTokenizer for word accuracy computation
 
-            if self.global_step % self.train_config.log_interval == 0:
-                self.writer.add_scalar("train/loss", loss.item(), self.global_step)
-                self.writer.add_scalar("train/learning_rate", current_lr, self.global_step)
-                for k, v in losses.items():
-                    if k != "total_loss":
-                        self.writer.add_scalar(f"train/{k}", v.item(), self.global_step)
+    Returns:
+        Function that computes metrics from EvalPrediction
+    """
 
-            # Step-based validation
-            if self.global_step % self.train_config.val_interval == 0:
-                print(f"\n[Step {self.global_step}] Running validation...")
-                val_metrics = self.evaluate_step(self.global_step)
-
-                # after val_metrics computed
-                current_accuracy = float(val_metrics["char_accuracy"])
-
-                # Always save a step checkpoint (optional)
-                step_path = (
-                    Path(self.train_config.checkpoint_dir)
-                    / f"checkpoint_step_{self.global_step}.pt"
-                )
-                self.save_checkpoint(str(step_path), epoch, val_metrics)
-
-                # Save best
-                if current_accuracy > self.best_accuracy:
-                    self.best_accuracy = current_accuracy
-                    best_path = Path(self.train_config.checkpoint_dir) / "best.pt"
-                    self.save_checkpoint(str(best_path), epoch, val_metrics)
-                    print(f"New best model saved! char_accuracy={current_accuracy:.4f}")
-
-                # Return to training mode
-                self.model.train()
-
-            self.global_step += 1
-
-        return sum(epoch_losses) / len(epoch_losses)
-
-    def evaluate_step(self, step: int) -> dict[str, float]:
+    def compute_metrics(eval_pred):
         """
-        Evaluate on validation set (called during training steps).
+        Compute character and word accuracy metrics.
 
         Args:
-            step: Current training step
+            eval_pred: EvalPrediction with predictions and label_ids
+                predictions: Model outputs (SwipeTransformerOutput)
+                label_ids: Dict with char_labels and optionally words
 
         Returns:
-            Dictionary of evaluation metrics
+            Dict with metrics
         """
-        self.model.eval()
-        self.char_accuracy.reset()
-        if self.word_accuracy:
-            self.word_accuracy.reset()
-        eval_losses = []
-        eval_loss_terms = {}
+        try:
+            # Extract predictions and labels
+            predictions, labels = eval_pred.predictions, eval_pred.label_ids
 
-        with torch.no_grad():
-            for batch in self.val_loader:
-                batch = {
-                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                    for k, v in batch.items()
-                }
+            # Predictions are the full sequence char_logits: [batch, seq_len, vocab_size]
+            # Labels are just the character portion: [batch, char_len]
+            # Sequence structure: [CLS] + path + [SEP] + chars
+            # We need to extract the character portion from predictions
 
-                outputs = self.model(
-                    path_coords=batch["path_coords"],
-                    char_tokens=batch["char_tokens"],
-                    attention_mask=batch["attention_mask"],
-                )
+            # Convert to torch tensors if needed
+            if not isinstance(predictions, torch.Tensor):
+                predictions = torch.tensor(predictions)
+            if not isinstance(labels, torch.Tensor):
+                labels = torch.tensor(labels)
 
-                losses = self.loss_fn(outputs, batch)
-                eval_losses.append(losses["total_loss"].item())
-                for k, v in losses.items():
-                    eval_loss_terms[k] = eval_loss_terms.get(k, 0.0) + float(v.item())
+            # Extract character portion from sequence
+            # Sequence is: [CLS] + path + [SEP] + chars
+            # Calculate where chars start dynamically
+            total_seq_len = predictions.shape[1]
+            char_len = labels.shape[1]
+            # path_len = total_seq_len - 1 (CLS) - 1 (SEP) - char_len
+            path_len = total_seq_len - 2 - char_len
+            char_start = 1 + path_len + 1  # After [CLS] + path + [SEP]
+            char_logits = predictions[:, char_start:char_start + char_len, :]  # [batch, char_len, vocab_size]
 
-                # Extract character predictions
-                char_logits = outputs["char_logits"]
-                path_len = batch["path_coords"].shape[1]
-                char_logits_subset = extract_character_logits(
-                    char_logits, path_len, batch["char_labels"].shape[1]
-                )
+            char_labels = labels
 
-                # Update metrics
-                self.char_accuracy.update(char_logits_subset, batch["char_labels"])
+            # Compute character accuracy
+            char_accuracy_metric = CharacterAccuracy(vocab_size=tokenizer.vocab_size, device="cpu")
+            char_accuracy_metric.update(char_logits, char_labels)
+            char_acc = char_accuracy_metric.compute()
 
-                if self.word_accuracy:
-                    self.word_accuracy.update(char_logits_subset, batch["words"])
+            metrics = {
+                "char_accuracy": float(char_acc),
+            }
 
-        # Compute metrics
-        avg_loss = sum(eval_losses) / len(eval_losses)
-        char_acc = self.char_accuracy.compute()
+            # Compute word accuracy if words are available
+            # Note: words are not typically available in the standard Trainer eval_pred
+            # This would require a custom data collator that preserves words in labels
 
-        metrics = {"loss": avg_loss, "char_accuracy": char_acc}
+            return metrics
+        except Exception as e:
+            logger.error(f"Error in compute_metrics: {e}", exc_info=True)
+            # Return empty dict on error
+            return {}
 
-        if self.word_accuracy:
-            word_acc = self.word_accuracy.compute()
-            metrics["word_accuracy"] = word_acc
-
-        # Add averaged loss components for logging
-        num_batches = len(eval_losses)
-        for k, v in eval_loss_terms.items():
-            metrics[f"{k}_mean"] = v / num_batches if num_batches > 0 else 0.0
-
-        # Log to TensorBoard
-        self.writer.add_scalar("eval/loss", avg_loss, step)
-        self.writer.add_scalar("eval/char_accuracy", char_acc, step)
-        if self.word_accuracy:
-            self.writer.add_scalar("eval/word_accuracy", word_acc, step)
-        for k, v in metrics.items():
-            if k.startswith("loss_") or k.endswith("_loss") or k.endswith("_mean"):
-                self.writer.add_scalar(f"eval/{k}", v, step)
-
-        # Print metrics
-        print(f"Val - Loss: {avg_loss:.4f}, Char Accuracy: {char_acc:.4f}", end="")
-        if self.word_accuracy:
-            print(f", Word Accuracy: {word_acc:.4f}")
-        else:
-            print()
-
-        return metrics
-
-    def evaluate(self, epoch: int) -> dict[str, float]:
-        """
-        Evaluate on validation set.
-
-        Args:
-            epoch: Current epoch number
-
-        Returns:
-            Dictionary of evaluation metrics
-        """
-        self.model.eval()
-        self.char_accuracy.reset()
-        if self.word_accuracy:
-            self.word_accuracy.reset()
-        eval_losses = []
-        eval_loss_terms = {}
-
-        with torch.no_grad():
-            for batch in tqdm(self.val_loader, desc="Evaluating"):
-                batch = batch_to_device(batch, self.device)
-
-                outputs = self.model(
-                    path_coords=batch["path_coords"],
-                    char_tokens=batch["char_tokens"],
-                    attention_mask=batch["attention_mask"],
-                )
-
-                losses = self.loss_fn(outputs, batch)
-                eval_losses.append(losses["total_loss"].item())
-                for k, v in losses.items():
-                    eval_loss_terms[k] = eval_loss_terms.get(k, 0.0) + float(v.item())
-
-                # Extract character predictions
-                char_logits = outputs["char_logits"]
-                path_len = batch["path_coords"].shape[1]
-                char_logits_subset = extract_character_logits(
-                    char_logits, path_len, batch["char_labels"].shape[1]
-                )
-
-                # Update metrics
-                self.char_accuracy.update(char_logits_subset, batch["char_labels"])
-
-                if self.word_accuracy:
-                    self.word_accuracy.update(char_logits_subset, batch["words"])
-
-        # Compute metrics
-        avg_loss = sum(eval_losses) / len(eval_losses)
-        char_acc = self.char_accuracy.compute()
-
-        metrics = {"loss": avg_loss, "char_accuracy": char_acc}
-
-        if self.word_accuracy:
-            word_acc = self.word_accuracy.compute()
-            metrics["word_accuracy"] = word_acc
-
-        # Add averaged loss components for logging
-        num_batches = len(eval_losses)
-        for k, v in eval_loss_terms.items():
-            metrics[f"{k}_mean"] = v / num_batches if num_batches > 0 else 0.0
-
-        # Log to TensorBoard (use global_step for proper alignment with training metrics)
-        self.writer.add_scalar("eval/loss", avg_loss, self.global_step)
-        self.writer.add_scalar("eval/char_accuracy", char_acc, self.global_step)
-        if self.word_accuracy:
-            self.writer.add_scalar("eval/word_accuracy", word_acc, self.global_step)
-        for k, v in metrics.items():
-            if k.startswith("loss_") or k.endswith("_loss") or k.endswith("_mean"):
-                self.writer.add_scalar(f"eval/{k}", v, self.global_step)
-
-        # Print metrics
-        print(
-            f"\nEval Epoch {epoch + 1} - Loss: {avg_loss:.4f}, Char Accuracy: {char_acc:.4f}",
-            end="",
-        )
-        if self.word_accuracy:
-            print(f", Word Accuracy: {word_acc:.4f}")
-        else:
-            print()
-
-        return metrics
-
-    def save_checkpoint(self, path: str, epoch: int, metrics: dict[str, float]):
-        """Save model checkpoint (manual torch.save, no Lightning)."""
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "metrics": metrics,
-            "config": self.config,
-            "global_step": self.global_step,
-        }
-        if self.scheduler:
-            checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
-        if self.scaler:
-            checkpoint["scaler_state_dict"] = self.scaler.state_dict()
-
-        torch.save(checkpoint, path)
-        print(f"Saved checkpoint: {path}")
-
-    def train(self, num_epochs: int, start_epoch: int = 0):
-        """
-        Main training loop.
-
-        Args:
-            num_epochs: Number of epochs to train
-        """
-        # Initialize best_accuracy for step-based validation (allow resume override)
-        if self.best_accuracy is None:
-            self.best_accuracy = 0.0
-
-        for epoch in range(start_epoch, num_epochs):
-            print(f"\n{'=' * 60}")
-            print(f"Epoch {epoch + 1}/{num_epochs}")
-            print(f"{'=' * 60}")
-
-            # Train
-            train_loss = self.train_epoch(epoch)
-            print(f"Train Loss: {train_loss:.4f}")
-
-            # End-of-epoch evaluation
-            print(f"\n[Epoch {epoch + 1}] Running end-of-epoch validation...")
-            eval_metrics = self.evaluate(epoch)
-
-            if (epoch + 1) % self.train_config.save_interval == 0:
-                epoch_path = (
-                    Path(self.train_config.checkpoint_dir) / f"checkpoint_epoch_{epoch + 1}.pt"
-                )
-                self.save_checkpoint(str(epoch_path), epoch, eval_metrics)
-
-                current_accuracy = float(eval_metrics["char_accuracy"])
-                if current_accuracy > self.best_accuracy:
-                    self.best_accuracy = current_accuracy
-                    best_path = Path(self.train_config.checkpoint_dir) / "best.pt"
-                    self.save_checkpoint(str(best_path), epoch, eval_metrics)
-                    print(f"New best model saved! char_accuracy={current_accuracy:.4f}")
-
-        self.writer.close()
-        print(f"\nTraining complete! Best character accuracy: {self.best_accuracy:.4f}")
+    return compute_metrics

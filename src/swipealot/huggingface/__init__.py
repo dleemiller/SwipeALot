@@ -1,9 +1,7 @@
 """HuggingFace integration for SwipeTransformer models."""
 
-from .configuration_swipe import SwipeCrossEncoderConfig, SwipeTransformerConfig
-from .cross_encoder_wrapper import SwipeCrossEncoder
+from .configuration_swipe import SwipeTransformerConfig
 from .modeling_swipe import (
-    SwipeCrossEncoderForSequenceClassification,
     SwipeModel,
     SwipeTransformerModel,
     SwipeTransformerPreTrainedModel,
@@ -13,12 +11,9 @@ from .tokenization_swipe import SwipeTokenizer
 
 __all__ = [
     "SwipeTransformerConfig",
-    "SwipeCrossEncoderConfig",
     "SwipeTransformerModel",
     "SwipeTransformerPreTrainedModel",
-    "SwipeCrossEncoderForSequenceClassification",
     "SwipeModel",
     "SwipeTokenizer",
     "SwipeProcessor",
-    "SwipeCrossEncoder",
 ]

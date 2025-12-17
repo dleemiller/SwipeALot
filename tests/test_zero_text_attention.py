@@ -6,7 +6,7 @@ from src.swipealot.data.tokenizer import CharacterTokenizer
 
 def test_text_attention_zeroed_in_modality_view_when_prob_one():
     """
-    With modality mode + zero_text_attention_prob=1.0, the text-masked view should
+    With modality mode + zero_attention_prob=1.0, the text-masked view should
     zero out text attention and drop text supervision, preventing leakage of text length.
     """
     tokenizer = CharacterTokenizer()
@@ -26,14 +26,14 @@ def test_text_attention_zeroed_in_modality_view_when_prob_one():
         tokenizer=tokenizer,
         mask_path=True,
         modality_prob=1.0,  # force modality mode
-        zero_text_attention_prob=1.0,  # always zero text attention on the text-masked view
+        zero_attention_prob=1.0,  # always zero attention for text-masked/path-masked views
     )
 
     batch = collator([sample])
 
     # View A (index 0) should have text attention zeroed and no text supervision
     attn_a = batch["attention_mask"][0]
-    char_tokens_a = batch["char_tokens"][0]
+    char_tokens_a = batch["input_ids"][0]
     char_labels_a = batch["char_labels"][0]
     char_mask_a = batch["char_mask"][0]
 
@@ -47,10 +47,12 @@ def test_text_attention_zeroed_in_modality_view_when_prob_one():
     assert torch.all(char_labels_a == -100)
     assert torch.all(char_mask_a == 0)
 
-    # View B (index 1) keeps normal attention/masks
+    # View B (index 1) zeros path attention (symmetry) but keeps text attention
     attn_b = batch["attention_mask"][1]
     char_mask_b = batch["char_mask"][1]
-    assert attn_b.sum().item() == 1 + path_len + 1 + char_len  # all attended
+    # Path section should be zeroed, text attended
+    assert attn_b[1 : 1 + path_len].sum().item() == 0
+    assert attn_b[-char_len:].sum().item() == char_len
     assert torch.all(char_mask_b == 1)
 
     # Length supervision: only the zero-text-attention view should be supervised
@@ -76,7 +78,7 @@ def test_length_target_ignores_punctuation_and_only_supervises_zero_text_view():
         tokenizer=tokenizer,
         mask_path=True,
         modality_prob=1.0,
-        zero_text_attention_prob=1.0,
+        zero_attention_prob=1.0,
     )
 
     batch = collator([sample])

@@ -116,7 +116,11 @@ class SwipeLoss(nn.Module):
         losses = {}
 
         # Character prediction loss
-        char_logits = outputs["char_logits"]  # [batch, full_seq_len, vocab_size]
+        # Handle both dict and dataclass outputs
+        if isinstance(outputs, dict):
+            char_logits = outputs["char_logits"]  # [batch, full_seq_len, vocab_size]
+        else:
+            char_logits = outputs.char_logits  # [batch, full_seq_len, vocab_size]
         char_labels = batch["char_labels"]  # [batch, char_len]
 
         # Extract character portion from sequence
@@ -156,8 +160,12 @@ class SwipeLoss(nn.Module):
         losses["char_loss"] = char_loss
 
         # Path prediction loss (if enabled)
-        if "path_coords_pred" in outputs and batch.get("path_labels") is not None:
-            path_pred = outputs["path_coords_pred"]  # [batch, full_seq_len, 3]
+        has_path_pred = "path_coords_pred" in outputs if isinstance(outputs, dict) else hasattr(outputs, "path_coords_pred")
+        if has_path_pred and batch.get("path_labels") is not None:
+            if isinstance(outputs, dict):
+                path_pred = outputs["path_coords_pred"]  # [batch, full_seq_len, 3]
+            else:
+                path_pred = outputs.path_coords_pred  # [batch, full_seq_len, 3]
             path_labels = batch["path_labels"]  # [batch, path_len, 3]
             path_mask_indices = batch["path_mask_indices"]  # [batch, path_len]
 
@@ -188,13 +196,17 @@ class SwipeLoss(nn.Module):
             total_loss = total_loss + self.path_weight * losses["path_loss"]
 
         # CLS length prediction (optional)
+        has_length_logits = "length_logits" in outputs if isinstance(outputs, dict) else hasattr(outputs, "length_logits")
         if (
             self.length_weight > 0.0
-            and "length_logits" in outputs
+            and has_length_logits
             and "length_target" in batch
             and "length_supervise_mask" in batch
         ):
-            length_logits = outputs["length_logits"]  # [batch, num_lengths]
+            if isinstance(outputs, dict):
+                length_logits = outputs["length_logits"]  # [batch, num_lengths]
+            else:
+                length_logits = outputs.length_logits  # [batch, num_lengths]
             length_target = batch["length_target"].long()  # [batch]
             supervise_mask = batch["length_supervise_mask"].bool()  # [batch]
             if supervise_mask.any():
@@ -208,7 +220,11 @@ class SwipeLoss(nn.Module):
 
         # Contrastive (Matryoshka-capable)
         if self.contrastive_weight > 0.0 and "pair_ids" in batch:
-            hidden_states = outputs["hidden_states"]  # [N, seq_len, d]
+            # Use last_hidden_state (always available) instead of hidden_states (only with output_hidden_states=True)
+            if isinstance(outputs, dict):
+                hidden_states = outputs.get("last_hidden_state", outputs.get("hidden_states"))  # [N, seq_len, d]
+            else:
+                hidden_states = outputs.last_hidden_state  # [N, seq_len, d]
             pair_ids = batch["pair_ids"]  # [N]
             gradient_mask = batch.get("gradient_mask")  # [N]
             path_len = batch["path_coords"].shape[1]

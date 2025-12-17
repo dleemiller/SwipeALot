@@ -184,7 +184,7 @@ class MaskedCollator:
 
         result = {
             "path_coords": masked_path_coords,
-            "char_tokens": masked_char_tokens,
+            "input_ids": masked_char_tokens,  # Renamed from char_tokens
             "char_labels": char_labels,
             "path_mask": path_mask,
             "char_mask": char_mask,
@@ -222,21 +222,21 @@ class PairwiseMaskedCollator:
         tokenizer: CharacterTokenizer,
         mask_path: bool = True,
         modality_prob: float = 0.2,
-        zero_text_attention_prob: float = 0.5,
+        zero_attention_prob: float = 0.5,
     ):
         """
         Args:
             tokenizer: Character tokenizer
             mask_path: Whether to mask path coordinates
             modality_prob: Probability of using modality-based masking (vs inverted)
-            zero_text_attention_prob: Probability of fully zeroing text attention in
-                the text-masked view to teach path-only embeddings (simulates inference
-                when text length is unknown)
+            zero_attention_prob: Probability of fully zeroing attention in modality mode.
+                When triggered, it zeros text attention for the text-masked view and path
+                attention for the path-masked view to drop supervision symmetrically.
         """
         self.tokenizer = tokenizer
         self.mask_path = mask_path
         self.modality_prob = modality_prob
-        self.zero_text_attention_prob = zero_text_attention_prob
+        self.zero_attention_prob = zero_attention_prob
         self.max_char_len = None  # derived per-sample
 
     def _create_inverted_masks(
@@ -395,16 +395,13 @@ class PairwiseMaskedCollator:
             masked_path_a = self._apply_path_mask(path_coords, path_mask_a)
             masked_char_a, labels_a = self._apply_char_mask(char_tokens, char_mask_a)
 
-            # Optionally zero out text attention for the text-masked view to remove
-            # length information (simulates path-only inference when text is unknown).
-            # We only do this when text is the modality being masked (char_mask_a all 1s
-            # and path is visible).
-            use_zero_text_attn = (
+            # Optionally zero out attention in modality mode to drop supervision symmetrically.
+            use_zero_attn = (
                 use_modality_mode
-                and self.zero_text_attention_prob > 0.0
-                and random.random() < self.zero_text_attention_prob
+                and self.zero_attention_prob > 0.0
+                and random.random() < self.zero_attention_prob
             )
-            if use_zero_text_attn:
+            if use_zero_attn:
                 # No attention to text positions; also drop char loss for this view.
                 attn_mask_a = torch.cat(
                     [cls_mask, path_mask, sep_mask, torch.zeros_like(char_mask)], dim=0
@@ -435,14 +432,26 @@ class PairwiseMaskedCollator:
             masked_path_b = self._apply_path_mask(path_coords, path_mask_b)
             masked_char_b, labels_b = self._apply_char_mask(char_tokens, char_mask_b)
 
+            if use_zero_attn and use_modality_mode:
+                # Symmetrically zero path attention on the key view and drop path supervision.
+                attn_mask_b = torch.cat(
+                    [cls_mask, torch.zeros_like(path_mask), sep_mask, char_mask], dim=0
+                )
+                path_mask_view_b = torch.zeros_like(path_mask)
+                path_mask_indices_b = torch.zeros_like(path_mask_b)
+            else:
+                attn_mask_b = attn_base
+                path_mask_view_b = path_mask
+                path_mask_indices_b = path_mask_b
+
             views_paths.append(masked_path_b)
             views_tokens.append(masked_char_b)
             views_labels.append(labels_b)
-            views_attention.append(attn_base)
+            views_attention.append(attn_mask_b)
             views_char_mask.append(char_mask)
-            views_path_mask.append(path_mask)
+            views_path_mask.append(path_mask_view_b)
             views_path_labels.append(path_coords)
-            views_path_mask_indices.append(path_mask_b)
+            views_path_mask_indices.append(path_mask_indices_b)
             pair_ids.append(pair_id)
             gradient_mask.append(gradient_b)
             length_targets.append(_swipable_length(item["word"], char_tokens.shape[0]))
@@ -450,7 +459,7 @@ class PairwiseMaskedCollator:
 
         result = {
             "path_coords": torch.stack(views_paths),
-            "char_tokens": torch.stack(views_tokens),
+            "input_ids": torch.stack(views_tokens),  # Renamed from char_tokens
             "char_labels": torch.stack(views_labels),
             "attention_mask": torch.stack(views_attention),
             "char_mask": torch.stack(views_char_mask),
@@ -506,95 +515,10 @@ class ValidationCollator:
 
         return {
             "path_coords": path_coords,
-            "char_tokens": masked_char_tokens,  # Use masked tokens for input
+            "input_ids": masked_char_tokens,  # Renamed from char_tokens
             "char_labels": char_labels,
             "path_mask": path_mask,
             "char_mask": char_mask,
             "attention_mask": attention_mask,
             "words": [item["word"] for item in batch],
-        }
-
-
-class CrossEncoderCollator:
-    """
-    Collator for cross-encoder training with Multiple Negatives Ranking Loss.
-
-    Batches (path, positive, negative_1, ..., negative_n) tuples.
-    Each query has 1 positive + N negatives.
-    """
-
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-
-    def __call__(self, batch):
-        """
-        Collate batch of cross-encoder samples.
-
-        Input: List of dicts with:
-            - path_coords: [path_len, 3]
-            - positive_word: [word_len]
-            - negative_words: [num_negatives, word_len]
-
-        Output: Dict with:
-            - path_coords: [batch * (1+N), path_len, 3]  # Repeated for each word
-            - char_tokens: [batch * (1+N), word_len]     # Positive + negatives
-            - attention_mask: [batch * (1+N), seq_len]
-            - labels: [batch] with value 0 (positive is always first in each group)
-            - group_sizes: [batch] with value (1+N) for each query
-        """
-        batch_size = len(batch)
-        num_negatives = batch[0]["negative_words"].shape[0]
-        docs_per_query = 1 + num_negatives  # 1 positive + N negatives
-
-        # Lists to accumulate all pairs
-        all_path_coords = []
-        all_path_masks = []
-        all_char_tokens = []
-        all_char_masks = []
-
-        # Process each query
-        for item in batch:
-            path_coords = item["path_coords"]  # [path_len, 3]
-            path_mask = item["path_mask"]  # [path_len]
-
-            # Positive pair
-            all_path_coords.append(path_coords)
-            all_path_masks.append(path_mask)
-            all_char_tokens.append(item["positive_word"])
-            all_char_masks.append(item["positive_mask"])
-
-            # Negative pairs
-            for i in range(num_negatives):
-                all_path_coords.append(path_coords)  # Same path repeated
-                all_path_masks.append(path_mask)
-                all_char_tokens.append(item["negative_words"][i])
-                all_char_masks.append(item["negative_masks"][i])
-
-        # Stack all pairs
-        path_coords = torch.stack(all_path_coords)  # [batch*(1+N), path_len, 3]
-        path_mask = torch.stack(all_path_masks)  # [batch*(1+N), path_len]
-        char_tokens = torch.stack(all_char_tokens)  # [batch*(1+N), word_len]
-        char_mask = torch.stack(all_char_masks)  # [batch*(1+N), word_len]
-
-        # Create attention mask: [CLS] + path + [SEP] + chars
-        batch_pairs = path_coords.shape[0]
-        cls_mask = torch.ones(batch_pairs, 1, dtype=torch.long)
-        sep_mask = torch.ones(batch_pairs, 1, dtype=torch.long)
-        attention_mask = torch.cat([cls_mask, path_mask, sep_mask, char_mask], dim=1)
-
-        # Labels: positive is always at index 0 within each group
-        labels = torch.zeros(batch_size, dtype=torch.long)
-
-        # Group sizes: how many docs per query
-        group_sizes = torch.full((batch_size,), docs_per_query, dtype=torch.long)
-
-        return {
-            "path_coords": path_coords,
-            "char_tokens": char_tokens,
-            "path_mask": path_mask,
-            "char_mask": char_mask,
-            "attention_mask": attention_mask,
-            "labels": labels,  # Positive is always index 0
-            "group_sizes": group_sizes,  # For reshaping scores
-            "batch_size": batch_size,  # Original batch size
         }

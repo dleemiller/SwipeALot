@@ -24,30 +24,49 @@ data:
   num_workers: 4
 
 training:
-  learning_rate: 0.0001
-  min_learning_rate: 0.00001
-  weight_decay: 0.01
-  num_epochs: 40
-  warmup_steps: 3600  # More warmup for larger model
+  # Custom SwipeALot parameters
   char_loss_weight: 1.0
   path_loss_weight: 0.5
-  log_interval: 100
-  val_interval: 1000
-  save_interval: 1
-  keep_n_checkpoints: 2  # Keep best + 2 most recent epoch checkpoints
-  log_dir: "logs"
-  checkpoint_dir: "checkpoints"
-  device: "cuda"
-  use_amp: true
-  amp_dtype: "bfloat16"
+  length_loss_weight: 0.1
+  contrastive_weight: 0.15
   use_focal_loss: true
   focal_gamma: 2.0
   use_char_freq_weights: true
   char_weights_path: "checkpoints/char_weights.pt"
   use_pairwise_masking: true
   pairwise_modality_prob: 0.2  # 20% modality masking, 80% inverted masking
-  contrastive_weight: 0.15
+  pairwise_zero_attention_prob: 0.5
   contrastive_temperature: 0.07
   matryoshka_dims: [64, 128, 384, 768]
   matryoshka_weights: [2.0, 1.5, 1.0, 1.0]
-  length_loss_weight: 0.1
+
+  # Standard HuggingFace TrainingArguments
+  training_args:
+    output_dir: "checkpoints"
+    num_train_epochs: 40
+    per_device_train_batch_size: 512
+    per_device_eval_batch_size: 512
+    gradient_accumulation_steps: 1
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    warmup_steps: 3600
+    logging_dir: "logs"
+    logging_steps: 100
+    logging_strategy: "steps"
+    eval_strategy: "steps"
+    eval_steps: 1000
+    save_steps: 1000
+    save_total_limit: 2
+    load_best_model_at_end: true
+    metric_for_best_model: "char_accuracy"
+    greater_is_better: true
+    bf16: true
+    fp16: false
+    remove_unused_columns: false
+    report_to: ["tensorboard"]
+    dataloader_num_workers: 4
+    dataloader_pin_memory: true
+    max_grad_norm: 1.0
+    save_strategy: "steps"
+    save_safetensors: true
+    prediction_loss_only: false

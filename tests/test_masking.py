@@ -1,65 +1,62 @@
-"""Test independent masking probabilities for path and text."""
+"""Test independent masking probabilities for path and text using synthetic data."""
 
+import torch
 from torch.utils.data import DataLoader
 
-from swipealot.data import MaskedCollator, SwipeDataset
+from swipealot.data import CharacterTokenizer, MaskedCollator
+
+
+def _make_sample(tokenizer: CharacterTokenizer, word: str, path_len: int, char_len: int):
+    path_coords = torch.randn(path_len, 3)
+    path_mask = torch.ones(path_len, dtype=torch.long)
+
+    token_ids = tokenizer.encode(word) + [tokenizer.eos_token_id]
+    token_ids = token_ids[: char_len - 1] + [tokenizer.eos_token_id]
+    token_ids = token_ids + [tokenizer.pad_token_id] * (char_len - len(token_ids))
+
+    char_mask = torch.tensor([1 if t != tokenizer.pad_token_id else 0 for t in token_ids])
+
+    return {
+        "path_coords": path_coords,
+        "path_mask": path_mask,
+        "char_tokens": torch.tensor(token_ids, dtype=torch.long),
+        "char_mask": char_mask,
+        "word": word,
+    }
 
 
 def test_independent_masking():
-    """Test that path and character masking work independently."""
+    torch.manual_seed(0)
+    tokenizer = CharacterTokenizer()
 
-    print("=" * 60)
-    print("TESTING INDEPENDENT MASKING PROBABILITIES")
-    print("=" * 60)
-
-    # Test different masking configurations
-    configs = [
-        {"char": 0.15, "path": 0.15, "name": "Balanced (15% both)"},
-        {"char": 0.30, "path": 0.15, "name": "High char, normal path (30% / 15%)"},
-        {"char": 0.15, "path": 0.30, "name": "Normal char, high path (15% / 30%)"},
-        {"char": 0.50, "path": 0.05, "name": "Very high char, low path (50% / 5%)"},
-        {"char": 0.0, "path": 0.20, "name": "No char masking, only path (0% / 20%)"},
+    samples = [
+        _make_sample(tokenizer, word, path_len=32, char_len=16)
+        for word in ["hello", "world", "keyboard", "swipe", "model", "test"] * 6
     ]
 
-    # Load small dataset
-    print("\nLoading dataset...")
-    dataset = SwipeDataset(
-        split="train",
-        max_path_len=128,
-        max_word_len=38,
-        dataset_name="futo-org/swipe.futo.org",
-        max_samples=100,
-    )
-    tokenizer = dataset.tokenizer
+    configs = [
+        {"char": 0.15, "path": 0.15},
+        {"char": 0.30, "path": 0.15},
+        {"char": 0.15, "path": 0.30},
+        {"char": 0.50, "path": 0.05},
+        {"char": 0.0, "path": 0.20},
+    ]
 
-    print(f"Loaded {len(dataset)} samples\n")
-
-    # Test each configuration
-    for config in configs:
-        print(f"\n{'=' * 60}")
-        print(f"Testing: {config['name']}")
-        print(f"{'=' * 60}")
-
+    for cfg in configs:
         collator = MaskedCollator(
             tokenizer=tokenizer,
-            char_mask_prob=config["char"],
-            path_mask_prob=config["path"],
+            char_mask_prob=cfg["char"],
+            path_mask_prob=cfg["path"],
             mask_path=True,
         )
-
-        # Create loader with single batch
-        loader = DataLoader(dataset, batch_size=32, shuffle=False, collate_fn=collator)
-
-        # Get one batch
+        loader = DataLoader(samples, batch_size=16, shuffle=False, collate_fn=collator)
         batch = next(iter(loader))
 
-        # Analyze masking (only count valid, non-padding positions)
-        char_labels = batch["char_labels"]  # -100 for non-masked
-        char_mask = batch["char_mask"]  # 1 for valid, 0 for padding
-        path_mask_indices = batch["path_mask_indices"]  # 1 for masked
-        path_mask = batch["path_mask"]  # 1 for valid, 0 for padding
+        char_labels = batch["char_labels"]
+        char_mask = batch["char_mask"]
+        path_mask_indices = batch["path_mask_indices"]
+        path_mask = batch["path_mask"]
 
-        # Count masked positions (only among valid positions)
         valid_char_positions = char_mask == 1
         char_masked = (char_labels != -100).sum().item()
         char_total_valid = valid_char_positions.sum().item()
@@ -70,44 +67,9 @@ def test_independent_masking():
         path_total_valid = valid_path_positions.sum().item()
         path_masked_pct = 100 * path_masked / path_total_valid if path_total_valid > 0 else 0
 
-        print("\nCharacter Masking:")
-        print(f"  Expected: {config['char'] * 100:.1f}%")
-        print(
-            f"  Actual:   {char_masked_pct:.1f}% ({char_masked}/{char_total_valid} valid positions)"
-        )
-        print(f"  Total positions (incl. padding): {char_labels.numel()}")
-
-        print("\nPath Masking:")
-        print(f"  Expected: {config['path'] * 100:.1f}%")
-        print(
-            f"  Actual:   {path_masked_pct:.1f}% ({path_masked}/{path_total_valid} valid positions)"
-        )
-        print(f"  Total positions (incl. padding): {path_mask_indices.numel()}")
-
-        # Check if within reasonable range (±3%)
-        char_ok = abs(char_masked_pct - config["char"] * 100) < 5
-        path_ok = abs(path_masked_pct - config["path"] * 100) < 5
-
-        if char_ok and path_ok:
-            print("\n✓ Both masking probabilities working correctly!")
-        else:
-            print("\n⚠ Warning: Masking probabilities outside expected range")
-            if not char_ok:
-                print(
-                    f"  - Character masking: {char_masked_pct:.1f}% (expected {config['char'] * 100:.1f}%)"
-                )
-            if not path_ok:
-                print(
-                    f"  - Path masking: {path_masked_pct:.1f}% (expected {config['path'] * 100:.1f}%)"
-                )
-
-    print("\n" + "=" * 60)
-    print("INDEPENDENT MASKING TEST COMPLETE")
-    print("=" * 60)
-    print("\n✓ Character and path masking are independently configurable!")
-    print("✓ Set via config.yaml:")
-    print("    char_mask_prob: 0.15  # 15% of character tokens")
-    print("    path_mask_prob: 0.15  # 15% of path points")
+        # Allow a loose tolerance; probabilities are stochastic
+        assert abs(char_masked_pct - cfg["char"] * 100) < 10
+        assert abs(path_masked_pct - cfg["path"] * 100) < 10
 
 
 if __name__ == "__main__":

@@ -1,120 +1,62 @@
-"""Test EOS token implementation."""
+"""EOS token handling tests."""
 
-from swipealot.data import MaskedCollator, SwipeDataset
+import torch
 
-print("=" * 60)
-print("Testing EOS Token Implementation")
-print("=" * 60)
+from swipealot.data import CharacterTokenizer, MaskedCollator
 
-# Build tokenizer
-print("\nBuilding tokenizer...")
-dataset = SwipeDataset(
-    split="train",
-    max_path_len=128,
-    max_word_len=38,
-    dataset_name="futo-org/swipe.futo.org",
-    max_samples=100,
-)
 
-tokenizer = dataset.tokenizer
+def _build_sample(tokenizer: CharacterTokenizer, word: str, max_char_len: int):
+    tokens = tokenizer.encode(word) + [tokenizer.eos_token_id]
+    tokens = tokens[: max_char_len - 1] + [tokenizer.eos_token_id]
+    tokens = tokens + [tokenizer.pad_token_id] * (max_char_len - len(tokens))
+    char_mask = torch.tensor([1 if t != tokenizer.pad_token_id else 0 for t in tokens])
 
-print(f"\nVocabulary size: {tokenizer.vocab_size}")
-print(f"Special tokens: {tokenizer.special_tokens}")
-print(f"  [PAD] = {tokenizer.pad_token_id}")
-print(f"  [CLS] = {tokenizer.cls_token_id}")
-print(f"  [SEP] = {tokenizer.sep_token_id}")
-print(f"  [MASK] = {tokenizer.mask_token_id}")
-print(f"  [EOS] = {tokenizer.eos_token_id}")
+    path_len = 4
+    return {
+        "path_coords": torch.zeros(path_len, 3),
+        "path_mask": torch.ones(path_len, dtype=torch.long),
+        "char_tokens": torch.tensor(tokens, dtype=torch.long),
+        "char_mask": char_mask,
+        "word": word,
+    }
 
-# Test encoding with EOS
-test_words = ["hello", "hi", "a", "test"]
 
-print("\n" + "=" * 60)
-print("Testing Word Encoding with EOS")
-print("=" * 60)
+def test_eos_token_added_and_preserved():
+    tokenizer = CharacterTokenizer()
+    max_char_len = 10
 
-for word in test_words:
-    # Get sample
-    sample = dataset.dataset[0]
-    sample["word"] = word
+    for word in ["hello", "hi", "a", "test"]:
+        sample = _build_sample(tokenizer, word, max_char_len)
+        tokens = sample["char_tokens"]
+        char_mask = sample["char_mask"]
 
-    # Process through dataset
-    processed = dataset.__getitem__(0)
-    char_tokens = processed["char_tokens"]
-    char_mask = processed["char_mask"]
+        # EOS should be present before padding starts
+        valid_tokens = tokens[char_mask == 1]
+        assert tokenizer.eos_token_id in valid_tokens.tolist()
 
-    print(f"\nWord: '{word}'")
-    print(f"  Length: {len(word)} chars")
+        # Decoding up to EOS should recover the original lowercase word
+        eos_idx = (valid_tokens == tokenizer.eos_token_id).nonzero(as_tuple=True)[0][0].item()
+        decoded = tokenizer.decode(valid_tokens[: eos_idx + 1].tolist())
+        assert decoded == word.lower()
 
-    # Find where valid tokens end
-    valid_positions = (char_mask == 1).nonzero(as_tuple=True)[0]
-    if len(valid_positions) > 0:
-        last_valid_idx = valid_positions[-1].item()
-        valid_tokens = char_tokens[: last_valid_idx + 1]
 
-        print(f"  Valid tokens: {valid_tokens.tolist()}")
-        print(f"  Decoded: {tokenizer.decode(valid_tokens.tolist())}")
+def test_eos_in_masking_labels():
+    tokenizer = CharacterTokenizer()
+    max_char_len = 8
 
-        # Check if EOS is present
-        if tokenizer.eos_token_id in valid_tokens:
-            eos_position = (
-                (valid_tokens == tokenizer.eos_token_id).nonzero(as_tuple=True)[0][0].item()
-            )
-            print(f"  ✓ EOS found at position {eos_position} (after {eos_position} chars)")
+    samples = [_build_sample(tokenizer, word, max_char_len) for word in ["hello", "world"]]
 
-            # Verify structure: [chars...] + [EOS] + [PAD...]
-            tokens_before_eos = valid_tokens[:eos_position]
-            print(f"  Characters before EOS: {tokenizer.decode(tokens_before_eos.tolist())}")
-        else:
-            print("  ✗ EOS not found!")
-    else:
-        print("  ✗ No valid tokens!")
+    collator = MaskedCollator(
+        tokenizer=tokenizer,
+        char_mask_prob=1.0,  # mask all valid tokens, including EOS
+        path_mask_prob=0.0,
+        mask_path=False,
+    )
 
-# Test masking includes EOS
-print("\n" + "=" * 60)
-print("Testing EOS Token Masking")
-print("=" * 60)
+    batch = collator(samples)
+    labels = batch["char_labels"]
 
-collator = MaskedCollator(
-    tokenizer=tokenizer,
-    char_mask_prob=1.0,  # Mask everything to test EOS masking
-    path_mask_prob=0.0,
-    mask_path=False,
-)
+    # Every sequence should include EOS in the masked labels
+    for seq_labels in labels:
+        assert tokenizer.eos_token_id in seq_labels.tolist()
 
-# Create a small batch
-batch_samples = [dataset[i] for i in range(4)]
-batch = collator(batch_samples)
-
-print(f"\nBatch char_labels shape: {batch['char_labels'].shape}")
-print(f"Batch char_tokens shape: {batch['char_tokens'].shape}")
-
-# Check if EOS tokens are in labels
-for i in range(min(2, len(batch["char_labels"]))):
-    labels = batch["char_labels"][i]
-    tokens = batch["char_tokens"][i]
-
-    # Find positions with labels (masked positions)
-    masked_positions = (labels != -100).nonzero(as_tuple=True)[0]
-
-    if len(masked_positions) > 0:
-        print(f"\nSample {i}:")
-        print(f"  Masked positions: {masked_positions.tolist()}")
-        print(f"  Labels at masked positions: {labels[masked_positions].tolist()}")
-
-        # Check if EOS is in the labels
-        if tokenizer.eos_token_id in labels:
-            print(f"  ✓ EOS token ({tokenizer.eos_token_id}) included in labels (will be trained)")
-        else:
-            print("  Note: EOS not masked in this sample (random masking)")
-
-print("\n" + "=" * 60)
-print("EOS Token Test Complete")
-print("=" * 60)
-
-print("\n✓ Key Points:")
-print("  1. EOS token added after each word")
-print("  2. EOS token can be masked and predicted (like regular chars)")
-print("  3. Model learns when words end")
-print("  4. PAD tokens still ignored in loss/accuracy")
-print("  5. Word accuracy compares up to EOS (not including padding)")

@@ -2,8 +2,7 @@
 
 import torch
 
-from swipealot.config import Config
-from swipealot.models import SwipeTransformerModel
+from swipealot.huggingface import SwipeTransformerConfig, SwipeTransformerModel
 from swipealot.training import SwipeLoss
 
 
@@ -12,25 +11,33 @@ def test_model():
     print("Testing model instantiation and forward pass...")
 
     # Create simple config
-    config = Config()
-    config.model.vocab_size = 100
+    config = SwipeTransformerConfig(
+        vocab_size=100,
+        d_model=128,
+        n_layers=2,
+        n_heads=2,
+        d_ff=256,
+        max_path_len=32,
+        max_char_len=20,
+        predict_path=True,
+    )
 
     # Create model
-    model = SwipeTransformerModel(config.model)
+    model = SwipeTransformerModel(config)
     print(f"✓ Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
 
     # Create dummy inputs
     batch_size = 2
-    path_coords = torch.randn(batch_size, config.model.max_path_len, 3)
-    char_tokens = torch.randint(0, 100, (batch_size, config.model.max_char_len))
+    path_coords = torch.randn(batch_size, config.max_path_len, 3)
+    input_ids = torch.randint(0, config.vocab_size, (batch_size, config.max_char_len))
     attention_mask = torch.ones(
-        batch_size, 1 + config.model.max_path_len + 1 + config.model.max_char_len
+        batch_size, 1 + config.max_path_len + 1 + config.max_char_len
     )
 
     # Forward pass
     model.eval()
     with torch.no_grad():
-        outputs = model(path_coords, char_tokens, attention_mask)
+        outputs = model(path_coords=path_coords, input_ids=input_ids, attention_mask=attention_mask)
 
     print("✓ Forward pass successful")
     print(f"  - char_logits shape: {outputs['char_logits'].shape}")
@@ -40,19 +47,17 @@ def test_model():
     # Test loss
     loss_fn = SwipeLoss()
     # Create char_labels: some positions are -100 (ignore), others are valid token IDs
-    char_labels = torch.randint(0, 100, (batch_size, config.model.max_char_len))
+    char_labels = torch.randint(0, config.vocab_size, (batch_size, config.max_char_len))
     # Randomly set some positions to -100 (ignored in loss)
-    mask = torch.rand(batch_size, config.model.max_char_len) > 0.85
+    mask = torch.rand(batch_size, config.max_char_len) > 0.85
     char_labels[mask] = -100
 
     batch = {
         "path_coords": path_coords,
-        "char_tokens": char_tokens,
+        "input_ids": input_ids,
         "char_labels": char_labels,
-        "path_labels": torch.randn(batch_size, config.model.max_path_len, 3).clamp(
-            0, 1
-        ),  # [0, 1] range
-        "path_mask_indices": torch.randint(0, 2, (batch_size, config.model.max_path_len)),
+        "path_labels": torch.randn(batch_size, config.max_path_len, 3).clamp(0, 1),  # [0, 1] range
+        "path_mask_indices": torch.randint(0, 2, (batch_size, config.max_path_len)),
     }
     losses = loss_fn(outputs, batch)
     print("✓ Loss computation successful")
@@ -61,7 +66,7 @@ def test_model():
     if "path_loss" in losses:
         print(f"  - path_loss: {losses['path_loss'].item():.4f}")
 
-    print("\n✓ All tests passed!")
+    assert losses["total_loss"].isfinite()
 
 
 if __name__ == "__main__":

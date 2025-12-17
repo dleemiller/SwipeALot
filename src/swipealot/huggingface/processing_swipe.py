@@ -365,3 +365,40 @@ class SwipeProcessor(ProcessorMixin):
         mask = np.array(mask, dtype=np.int64)
 
         return coords, mask
+
+    def save_pretrained(
+        self,
+        save_directory,
+        push_to_hub=False,
+        **kwargs,
+    ):
+        """
+        Save the processor to a directory, ensuring auto_map is included.
+        """
+        # Call parent save_pretrained
+        result = super().save_pretrained(
+            save_directory,
+            push_to_hub=push_to_hub,
+            **kwargs,
+        )
+
+        # Add auto_map to processor_config.json for AutoProcessor compatibility
+        import json
+        from pathlib import Path
+
+        # Try both possible config file names
+        for config_name in ["preprocessor_config.json", "processor_config.json"]:
+            processor_config_path = Path(save_directory) / config_name
+            if processor_config_path.exists():
+                with open(processor_config_path, "r") as f:
+                    config = json.load(f)
+
+                config["auto_map"] = {
+                    "AutoProcessor": "processing_swipe.SwipeProcessor"
+                }
+
+                with open(processor_config_path, "w") as f:
+                    json.dump(config, f, indent=2)
+                break
+
+        return result
