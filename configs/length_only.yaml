@@ -46,7 +46,7 @@ training:
   char_weights_path: null
   use_pairwise_masking: true
   pairwise_modality_prob: 1.0              # 100% modality masking
-  pairwise_zero_text_attention_prob: 1.0   # Always zero text attention for length-only training
+  pairwise_zero_attention_prob: 1.0   # Always zero attention (text/path) for length-only training
   contrastive_weight: 0.0
   contrastive_temperature: 0.07
   matryoshka_dims: [64, 128, 384, 768]

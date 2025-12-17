@@ -1,68 +1,22 @@
-"""Test case-insensitive tokenizer."""
+"""Tokenizer case-insensitivity checks."""
 
-from swipealot.data import SwipeDataset
+from swipealot.data import CharacterTokenizer
 
-print("=" * 60)
-print("Testing Case-Insensitive Tokenizer")
-print("=" * 60)
 
-# Load small dataset sample
-print("\nLoading dataset...")
-dataset = SwipeDataset(
-    split="train",
-    max_path_len=128,
-    max_word_len=38,
-    dataset_name="futo-org/swipe.futo.org",
-    max_samples=1000,
-)
+def test_tokenizer_is_case_insensitive():
+    tokenizer = CharacterTokenizer()
 
-tokenizer = dataset.tokenizer
+    variants = ["hello", "HELLO", "Hello", "HeLLo"]
+    encoded = [tokenizer.encode(v) for v in variants]
 
-print(f"\nVocabulary size: {tokenizer.vocab_size}")
-print(f"Special tokens: {tokenizer.special_tokens}")
+    # All encodings should match (case-insensitive)
+    assert all(seq == encoded[0] for seq in encoded)
 
-# Show some of the vocabulary (excluding special tokens)
-vocab_chars = sorted(
-    [char for char in tokenizer.char_to_id.keys() if char not in tokenizer.special_tokens]
-)
-print(f"\nCharacter vocabulary ({len(vocab_chars)} chars):")
-print(f"  {''.join(vocab_chars[:50])}..." if len(vocab_chars) > 50 else f"  {''.join(vocab_chars)}")
+    # Decoding should lowercase and drop specials
+    assert tokenizer.decode(encoded[0]) == "hello"
 
-# Test encoding/decoding
-test_cases = [
-    "hello",
-    "HELLO",
-    "Hello",
-    "HeLLo",
-]
-
-print("\n" + "=" * 60)
-print("Testing Encoding/Decoding (All should produce 'hello')")
-print("=" * 60)
-
-for text in test_cases:
-    encoded = tokenizer.encode(text)
-    decoded = tokenizer.decode(encoded)
-    print(f"\nInput:   '{text}'")
-    print(f"Encoded: {encoded}")
-    print(f"Decoded: '{decoded}'")
-    print("✓ Match!" if decoded == "hello" else "✗ Mismatch!")
-
-# Check that uppercase letters are NOT in vocabulary
-print("\n" + "=" * 60)
-print("Uppercase Letter Check")
-print("=" * 60)
-
-uppercase_found = any(char.isupper() and char.isalpha() for char in tokenizer.char_to_id.keys())
-if uppercase_found:
-    print("✗ Found uppercase letters in vocabulary (should be none)")
-else:
-    print("✓ No uppercase letters in vocabulary (correct!)")
-
-# Show vocabulary reduction
-print("\n" + "=" * 60)
-print("Vocabulary Size Comparison")
-print("=" * 60)
-print(f"Case-insensitive vocabulary: {tokenizer.vocab_size} tokens")
-print("  (Excludes uppercase duplicates, reducing vocab size)")
-print("\n✓ Tokenizer is case-insensitive!")
+    # Uppercase letters should not appear in the vocabulary keys
+    uppercase_in_vocab = any(
+        ch.isupper() and len(ch) == 1 for ch in tokenizer.char_to_id.keys() if ch not in tokenizer.special_tokens
+    )
+    assert uppercase_in_vocab is False

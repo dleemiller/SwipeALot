@@ -163,7 +163,7 @@ def main():
             tokenizer=tokenizer,
             mask_path=config.data.mask_path,
             modality_prob=config.training.pairwise_modality_prob,
-            zero_text_attention_prob=config.training.pairwise_zero_text_attention_prob,
+            zero_attention_prob=config.training.pairwise_zero_attention_prob,
         )
         # Use unmasked validation for true accuracy metrics
         val_collator = ValidationCollator(tokenizer=tokenizer)

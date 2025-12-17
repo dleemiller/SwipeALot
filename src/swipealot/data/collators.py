@@ -222,21 +222,21 @@ class PairwiseMaskedCollator:
         tokenizer: CharacterTokenizer,
         mask_path: bool = True,
         modality_prob: float = 0.2,
-        zero_text_attention_prob: float = 0.5,
+        zero_attention_prob: float = 0.5,
     ):
         """
         Args:
             tokenizer: Character tokenizer
             mask_path: Whether to mask path coordinates
             modality_prob: Probability of using modality-based masking (vs inverted)
-            zero_text_attention_prob: Probability of fully zeroing text attention in
-                the text-masked view to teach path-only embeddings (simulates inference
-                when text length is unknown)
+            zero_attention_prob: Probability of fully zeroing attention in modality mode.
+                When triggered, it zeros text attention for the text-masked view and path
+                attention for the path-masked view to drop supervision symmetrically.
         """
         self.tokenizer = tokenizer
         self.mask_path = mask_path
         self.modality_prob = modality_prob
-        self.zero_text_attention_prob = zero_text_attention_prob
+        self.zero_attention_prob = zero_attention_prob
         self.max_char_len = None  # derived per-sample
 
     def _create_inverted_masks(
@@ -395,16 +395,13 @@ class PairwiseMaskedCollator:
             masked_path_a = self._apply_path_mask(path_coords, path_mask_a)
             masked_char_a, labels_a = self._apply_char_mask(char_tokens, char_mask_a)
 
-            # Optionally zero out text attention for the text-masked view to remove
-            # length information (simulates path-only inference when text is unknown).
-            # We only do this when text is the modality being masked (char_mask_a all 1s
-            # and path is visible).
-            use_zero_text_attn = (
+            # Optionally zero out attention in modality mode to drop supervision symmetrically.
+            use_zero_attn = (
                 use_modality_mode
-                and self.zero_text_attention_prob > 0.0
-                and random.random() < self.zero_text_attention_prob
+                and self.zero_attention_prob > 0.0
+                and random.random() < self.zero_attention_prob
             )
-            if use_zero_text_attn:
+            if use_zero_attn:
                 # No attention to text positions; also drop char loss for this view.
                 attn_mask_a = torch.cat(
                     [cls_mask, path_mask, sep_mask, torch.zeros_like(char_mask)], dim=0
@@ -435,14 +432,26 @@ class PairwiseMaskedCollator:
             masked_path_b = self._apply_path_mask(path_coords, path_mask_b)
             masked_char_b, labels_b = self._apply_char_mask(char_tokens, char_mask_b)
 
+            if use_zero_attn and use_modality_mode:
+                # Symmetrically zero path attention on the key view and drop path supervision.
+                attn_mask_b = torch.cat(
+                    [cls_mask, torch.zeros_like(path_mask), sep_mask, char_mask], dim=0
+                )
+                path_mask_view_b = torch.zeros_like(path_mask)
+                path_mask_indices_b = torch.zeros_like(path_mask_b)
+            else:
+                attn_mask_b = attn_base
+                path_mask_view_b = path_mask
+                path_mask_indices_b = path_mask_b
+
             views_paths.append(masked_path_b)
             views_tokens.append(masked_char_b)
             views_labels.append(labels_b)
-            views_attention.append(attn_base)
+            views_attention.append(attn_mask_b)
             views_char_mask.append(char_mask)
-            views_path_mask.append(path_mask)
+            views_path_mask.append(path_mask_view_b)
             views_path_labels.append(path_coords)
-            views_path_mask_indices.append(path_mask_b)
+            views_path_mask_indices.append(path_mask_indices_b)
             pair_ids.append(pair_id)
             gradient_mask.append(gradient_b)
             length_targets.append(_swipable_length(item["word"], char_tokens.shape[0]))
@@ -513,5 +522,3 @@ class ValidationCollator:
             "attention_mask": attention_mask,
             "words": [item["word"] for item in batch],
         }
-
-

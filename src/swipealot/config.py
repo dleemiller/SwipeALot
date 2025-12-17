@@ -72,7 +72,7 @@ class TrainingConfig:
     # Pairwise masking + contrastive objective
     use_pairwise_masking: bool = False
     pairwise_modality_prob: float = 0.2  # Probability of using modality-based masking (vs inverted)
-    pairwise_zero_text_attention_prob: float = 0.5  # Probability of zeroing text attention
+    pairwise_zero_attention_prob: float = 0.5  # Probability of zeroing attention in modality mode
     contrastive_weight: float = 0.0
     contrastive_temperature: float = 0.1
 

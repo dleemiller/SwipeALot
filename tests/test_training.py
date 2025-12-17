@@ -52,8 +52,8 @@ def test_training(num_steps: int = 3, batch_size: int = 2):
     ]
     collator = MaskedCollator(
         tokenizer=tokenizer,
-        char_mask_prob=0.15,
-        path_mask_prob=0.15,
+        char_mask_prob=1.0,  # ensure supervised tokens for the smoke test
+        path_mask_prob=0.1,
         mask_path=True,
     )
     train_loader = DataLoader(samples, batch_size=batch_size, shuffle=True, collate_fn=collator)
@@ -78,6 +78,7 @@ def test_training(num_steps: int = 3, batch_size: int = 2):
         losses = loss_fn(outputs, batch)
         loss = losses["total_loss"]
 
+        assert loss.requires_grad, "Loss should require gradients for backprop"
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
