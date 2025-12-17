@@ -223,6 +223,10 @@ class PairwiseMaskedCollator:
         mask_path: bool = True,
         modality_prob: float = 0.2,
         zero_attention_prob: float = 0.5,
+        inverted_char_prob_heavy: float | tuple[float, float] = (0.5, 0.7),
+        inverted_path_prob_heavy: float | tuple[float, float] = (0.5, 0.7),
+        inverted_char_prob_light: float | tuple[float, float] = (0.1, 0.2),
+        inverted_path_prob_light: float | tuple[float, float] = (0.1, 0.2),
     ):
         """
         Args:
@@ -232,12 +236,19 @@ class PairwiseMaskedCollator:
             zero_attention_prob: Probability of fully zeroing attention in modality mode.
                 When triggered, it zeros text attention for the text-masked view and path
                 attention for the path-masked view to drop supervision symmetrically.
+            inverted_*_prob_*: Masking probabilities for inverted mode; can be floats or
+                (min, max) ranges sampled per call.
         """
         self.tokenizer = tokenizer
         self.mask_path = mask_path
         self.modality_prob = modality_prob
         self.zero_attention_prob = zero_attention_prob
         self.max_char_len = None  # derived per-sample
+        # Configurable inverted-mode probabilities (can be floats or (min,max) ranges)
+        self.pairwise_inverted_char_prob_heavy = inverted_char_prob_heavy
+        self.pairwise_inverted_path_prob_heavy = inverted_path_prob_heavy
+        self.pairwise_inverted_char_prob_light = inverted_char_prob_light
+        self.pairwise_inverted_path_prob_light = inverted_path_prob_light
 
     def _create_inverted_masks(
         self, path_coords, path_mask, char_tokens, char_mask, heavy_aug: bool
@@ -253,13 +264,18 @@ class PairwiseMaskedCollator:
         path_len = path_coords.shape[0]
         char_len = char_tokens.shape[0]
 
+        def _prob_from_cfg(val):
+            if isinstance(val, (tuple, list)):
+                return random.uniform(val[0], val[1])
+            return float(val)
+
         # Random masking probabilities based on augmentation strength
         if heavy_aug:
-            path_mask_prob = random.uniform(0.5, 0.7)
-            text_mask_prob = random.uniform(0.5, 0.7)
+            path_mask_prob = _prob_from_cfg(self.pairwise_inverted_path_prob_heavy)
+            text_mask_prob = _prob_from_cfg(self.pairwise_inverted_char_prob_heavy)
         else:
-            path_mask_prob = random.uniform(0.1, 0.2)
-            text_mask_prob = random.uniform(0.1, 0.2)
+            path_mask_prob = _prob_from_cfg(self.pairwise_inverted_path_prob_light)
+            text_mask_prob = _prob_from_cfg(self.pairwise_inverted_char_prob_light)
 
         # Create path mask
         path_mask_indices = torch.zeros(path_len, dtype=torch.long)

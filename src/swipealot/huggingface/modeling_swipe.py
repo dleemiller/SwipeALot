@@ -115,9 +115,13 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
         )
 
         # Prediction heads
-        self.char_head = CharacterPredictionHead(
-            d_model=config.d_model,
-            vocab_size=config.vocab_size,
+        self.char_head = (
+            CharacterPredictionHead(
+                d_model=config.d_model,
+                vocab_size=config.vocab_size,
+            )
+            if config.predict_char
+            else None
         )
 
         if config.predict_path:
@@ -127,10 +131,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         # Length prediction head (predicts word length from path)
         # Max length is max_char_len (including EOS)
-        self.length_head = LengthPredictionHead(
-            d_model=config.d_model,
-            max_length=config.max_char_len,
-        )
+        self.length_head = LengthPredictionHead(d_model=config.d_model) if config.predict_length else None
 
         # Initialize weights
         self.post_init()
@@ -207,7 +208,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
         hidden_states = self.encoder(embeddings, src_key_padding_mask=src_key_padding_mask)
 
         # Character prediction
-        char_logits = self.char_head(hidden_states)
+        char_logits = self.char_head(hidden_states) if self.char_head is not None else None
 
         # Path prediction (if enabled)
         path_logits = None
@@ -216,7 +217,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         # Length prediction from CLS token
         cls_hidden = hidden_states[:, 0, :]  # [batch, d_model] - CLS at position 0
-        length_logits = self.length_head(cls_hidden)  # [batch, max_length]
+        length_logits = self.length_head(cls_hidden) if self.length_head is not None else None
 
         # Extract SEP token embedding for pooler output (embeddings/similarity tasks)
         # SEP is at position 1 + path_len
@@ -226,7 +227,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         # Compute loss if labels provided
         loss = None
-        if char_labels is not None:
+        if char_labels is not None and self.char_head is not None:
             loss_fct = nn.CrossEntropyLoss(ignore_index=self.config.pad_token_id)
             # Extract character positions from hidden states
             # Sequence is: [CLS] + path + [SEP] + chars

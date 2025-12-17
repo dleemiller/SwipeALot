@@ -86,14 +86,14 @@ class ClassificationHead(nn.Module):
 
 
 class LengthPredictionHead(nn.Module):
-    """Predict sequence length (e.g., swipable character count) from CLS embedding."""
+    """Regress sequence length (e.g., swipable character count) from CLS embedding."""
 
-    def __init__(self, d_model: int, max_length: int):
+    def __init__(self, d_model: int):
         super().__init__()
         self.dense = nn.Linear(d_model, d_model)
         self.activation = nn.GELU()
         self.norm = nn.LayerNorm(d_model)
-        self.classifier = nn.Linear(d_model, max_length + 1)  # classes: 0..max_length
+        self.regressor = nn.Linear(d_model, 1)  # predict expected length directly
 
     def forward(self, cls_features: torch.Tensor) -> torch.Tensor:
         """
@@ -101,9 +101,9 @@ class LengthPredictionHead(nn.Module):
             cls_features: [batch, d_model] CLS embeddings
 
         Returns:
-            [batch, max_length+1] logits over lengths
+            [batch, 1] predicted length
         """
         x = self.dense(cls_features)
         x = self.activation(x)
         x = self.norm(x)
-        return self.classifier(x)
+        return self.regressor(x).squeeze(-1)

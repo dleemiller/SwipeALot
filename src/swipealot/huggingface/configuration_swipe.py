@@ -41,7 +41,9 @@ class SwipeTransformerConfig(PretrainedConfig):
         vocab_size: int = 100,
         max_path_len: int = 64,
         max_char_len: int = 38,
+        predict_char: bool = True,
         predict_path: bool = True,
+        predict_length: bool = True,
         pad_token_id: int = 0,
         cls_token_id: int = 1,
         sep_token_id: int = 2,
@@ -65,12 +67,12 @@ class SwipeTransformerConfig(PretrainedConfig):
         self.max_char_len = max_char_len
 
         # Model capabilities
+        self.predict_char = predict_char
         self.predict_path = predict_path
+        self.predict_length = predict_length
 
         # Special tokens
         self.cls_token_id = cls_token_id
         self.sep_token_id = sep_token_id
         self.mask_token_id = mask_token_id
         self.unk_token_id = unk_token_id
-
-

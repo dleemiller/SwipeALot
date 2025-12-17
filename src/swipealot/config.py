@@ -26,6 +26,7 @@ class ModelConfig:
 
     # Tasks
     predict_path: bool = True
+    predict_char: bool = True  # Core MLM objective (can be disabled with char_loss_weight=0)
     predict_length: bool = True  # Auxiliary CLS head to predict swipable length
 
 
@@ -50,7 +51,7 @@ class DataConfig:
     mask_vocab_only: bool = False  # Only mask vocabulary tokens (a-z, 0-9)
 
     # DataLoader
-    batch_size: int = 512
+    batch_size: int | None = None  # Deprecated; use training.training_args.per_device_* instead
     num_workers: int = 4
 
 
@@ -73,6 +74,10 @@ class TrainingConfig:
     use_pairwise_masking: bool = False
     pairwise_modality_prob: float = 0.2  # Probability of using modality-based masking (vs inverted)
     pairwise_zero_attention_prob: float = 0.5  # Probability of zeroing attention in modality mode
+    pairwise_inverted_char_prob_heavy: float | tuple[float, float] = (0.5, 0.7)
+    pairwise_inverted_path_prob_heavy: float | tuple[float, float] = (0.5, 0.7)
+    pairwise_inverted_char_prob_light: float | tuple[float, float] = (0.1, 0.2)
+    pairwise_inverted_path_prob_light: float | tuple[float, float] = (0.1, 0.2)
     contrastive_weight: float = 0.0
     contrastive_temperature: float = 0.1
 

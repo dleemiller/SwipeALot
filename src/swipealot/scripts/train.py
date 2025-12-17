@@ -164,6 +164,10 @@ def main():
             mask_path=config.data.mask_path,
             modality_prob=config.training.pairwise_modality_prob,
             zero_attention_prob=config.training.pairwise_zero_attention_prob,
+            inverted_char_prob_heavy=config.training.pairwise_inverted_char_prob_heavy,
+            inverted_path_prob_heavy=config.training.pairwise_inverted_path_prob_heavy,
+            inverted_char_prob_light=config.training.pairwise_inverted_char_prob_light,
+            inverted_path_prob_light=config.training.pairwise_inverted_path_prob_light,
         )
         # Use unmasked validation for true accuracy metrics
         val_collator = ValidationCollator(tokenizer=tokenizer)
@@ -173,6 +177,9 @@ def main():
             f"Using pairwise masking for training ([yellow]{inverted_pct}%[/yellow] inverted, [yellow]{modality_pct}%[/yellow] modality)"
         )
         logger.info("Using unmasked evaluation for validation")
+        logger.info(
+            "Note: data.char_mask_prob/path_mask_prob are ignored when use_pairwise_masking=True"
+        )
     else:
         train_collator = MaskedCollator(
             tokenizer=tokenizer,
@@ -240,11 +247,6 @@ def main():
     # Override with run-specific settings
     training_args_dict["output_dir"] = output_dir
     training_args_dict["logging_dir"] = log_dir
-
-    # Override batch sizes if specified in data config (for backward compatibility)
-    if config.data.batch_size:
-        training_args_dict.setdefault("per_device_train_batch_size", config.data.batch_size)
-        training_args_dict.setdefault("per_device_eval_batch_size", config.data.batch_size)
 
     # Override num_workers if specified in data config
     if config.data.num_workers:

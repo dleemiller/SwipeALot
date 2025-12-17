@@ -118,45 +118,52 @@ class SwipeLoss(nn.Module):
         # Character prediction loss
         # Handle both dict and dataclass outputs
         if isinstance(outputs, dict):
-            char_logits = outputs["char_logits"]  # [batch, full_seq_len, vocab_size]
+            char_logits = outputs.get("char_logits")  # [batch, full_seq_len, vocab_size] or None
         else:
-            char_logits = outputs.char_logits  # [batch, full_seq_len, vocab_size]
-        char_labels = batch["char_labels"]  # [batch, char_len]
+            char_logits = getattr(outputs, "char_logits", None)
+        char_labels = batch.get("char_labels")
 
-        # Extract character portion from sequence
-        # Sequence structure: [CLS] + path + [SEP] + chars
-        path_len = batch["path_coords"].shape[1]
-        char_logits_subset = extract_character_logits(char_logits, path_len, char_labels.shape[1])
-
-        # Flatten for loss computation
-        char_logits_flat = char_logits_subset.reshape(-1, char_logits_subset.shape[-1])
-        char_labels_flat = char_labels.reshape(-1)
-
-        # Only keep supervised positions
-        mask = char_labels_flat != -100
-        if mask.any():
-            logits_supervised = char_logits_flat[mask]
-            labels_supervised = char_labels_flat[mask]
-
-            # Use F.cross_entropy for cleaner implementation
-            loss_terms = F.cross_entropy(
-                logits_supervised, labels_supervised, reduction="none", weight=None
+        if char_logits is None or char_labels is None:
+            # Skip char loss if head disabled or labels absent
+            device = batch["path_coords"].device
+            char_loss = torch.tensor(0.0, device=device)
+        else:
+            # Extract character portion from sequence
+            # Sequence structure: [CLS] + path + [SEP] + chars
+            path_len = batch["path_coords"].shape[1]
+            char_logits_subset = extract_character_logits(
+                char_logits, path_len, char_labels.shape[1]
             )
 
-            # Optional class frequency weighting
-            if self.char_class_weights is not None:
-                loss_terms = loss_terms * self.char_class_weights[labels_supervised]
+            # Flatten for loss computation
+            char_logits_flat = char_logits_subset.reshape(-1, char_logits_subset.shape[-1])
+            char_labels_flat = char_labels.reshape(-1)
 
-            # Optional focal modulation (focal loss formulation)
-            if self.focal_gamma > 0.0:
-                # Compute pt (probability of true class) for focal weighting
-                pt = torch.exp(-loss_terms)  # Since loss = -log(pt), pt = exp(-loss)
-                focal_weight = (1 - pt) ** self.focal_gamma
-                loss_terms = focal_weight * loss_terms
+            # Only keep supervised positions
+            mask = char_labels_flat != -100
+            if mask.any():
+                logits_supervised = char_logits_flat[mask]
+                labels_supervised = char_labels_flat[mask]
 
-            char_loss = loss_terms.mean()
-        else:
-            char_loss = torch.tensor(0.0, device=char_logits.device)
+                # Use F.cross_entropy for cleaner implementation
+                loss_terms = F.cross_entropy(
+                    logits_supervised, labels_supervised, reduction="none", weight=None
+                )
+
+                # Optional class frequency weighting
+                if self.char_class_weights is not None:
+                    loss_terms = loss_terms * self.char_class_weights[labels_supervised]
+
+                # Optional focal modulation (focal loss formulation)
+                if self.focal_gamma > 0.0:
+                    # Compute pt (probability of true class) for focal weighting
+                    pt = torch.exp(-loss_terms)  # Since loss = -log(pt), pt = exp(-loss)
+                    focal_weight = (1 - pt) ** self.focal_gamma
+                    loss_terms = focal_weight * loss_terms
+
+                char_loss = loss_terms.mean()
+            else:
+                char_loss = torch.tensor(0.0, device=char_logits.device)
         losses["char_loss"] = char_loss
 
         # Path prediction loss (if enabled)
@@ -204,17 +211,17 @@ class SwipeLoss(nn.Module):
             and "length_supervise_mask" in batch
         ):
             if isinstance(outputs, dict):
-                length_logits = outputs["length_logits"]  # [batch, num_lengths]
+                length_pred = outputs["length_logits"]  # [batch]
             else:
-                length_logits = outputs.length_logits  # [batch, num_lengths]
-            length_target = batch["length_target"].long()  # [batch]
+                length_pred = outputs.length_logits  # [batch]
+            length_target = batch["length_target"].float()  # [batch]
             supervise_mask = batch["length_supervise_mask"].bool()  # [batch]
             if supervise_mask.any():
-                ce = nn.CrossEntropyLoss(reduction="none")
-                length_loss_terms = ce(length_logits, length_target)
+                huber = nn.SmoothL1Loss(reduction="none")
+                length_loss_terms = huber(length_pred, length_target)
                 length_loss = length_loss_terms[supervise_mask].mean()
             else:
-                length_loss = torch.tensor(0.0, device=length_logits.device)
+                length_loss = torch.tensor(0.0, device=length_pred.device)
             losses["length_loss"] = length_loss
             total_loss = total_loss + self.length_weight * length_loss
 
