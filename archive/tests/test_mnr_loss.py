@@ -1,9 +1,34 @@
-"""Tests for MultipleNegativesRankingLoss."""
+"""Archived tests for cross-encoder `MultipleNegativesRankingLoss`.
+
+This is legacy cross-encoder code; active training uses the pairwise contrastive objective
+in `src/swipealot/training/loss.py`.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 
-from src.swipealot.training.loss import MultipleNegativesRankingLoss
+
+def _load_archived_mnr_loss():
+    loss_py = (
+        Path(__file__).resolve().parents[1]
+        / "cross_encoder"
+        / "training"
+        / "loss.py"
+    )
+    spec = importlib.util.spec_from_file_location("archive_cross_encoder_loss", loss_py)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load archived module: {loss_py}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.MultipleNegativesRankingLoss
+
+
+MultipleNegativesRankingLoss = _load_archived_mnr_loss()
 
 
 class TestMultipleNegativesRankingLoss:

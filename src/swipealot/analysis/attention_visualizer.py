@@ -63,6 +63,29 @@ def _infer_time_axis(path_coords: np.ndarray) -> tuple[np.ndarray, str]:
     return np.arange(n_points), "Path position"
 
 
+def _pool_layer_attentions(attention_stack: np.ndarray, pooling_method: str) -> np.ndarray:
+    """Pool an attention stack across layers.
+
+    Args:
+        attention_stack: [n_layers, n_chars, n_path]
+        pooling_method: "max" | "mean" | "sum" | "logsumexp"
+
+    Returns:
+        [n_chars, n_path]
+    """
+    if pooling_method == "max":
+        return attention_stack.max(axis=0)
+    if pooling_method == "mean":
+        return attention_stack.mean(axis=0)
+    if pooling_method == "sum":
+        return attention_stack.sum(axis=0)
+    if pooling_method == "logsumexp":
+        # scipy-free stable logsumexp over layers
+        m = attention_stack.max(axis=0)
+        return m + np.log(np.exp(attention_stack - m).sum(axis=0) + 1e-12)
+    raise ValueError(f"Unknown pooling method: {pooling_method}")
+
+
 def plot_attention_heatmap_on_path(
     ax: plt.Axes,
     path_coords: np.ndarray,
@@ -387,18 +410,7 @@ def create_layer_pooled_visualization(
     attention_stack = np.stack([attn for attn in layer_attentions.values()], axis=0)
     # Shape: [n_layers, n_chars, n_path_points]
 
-    if pooling_method == "max":
-        pooled_attention = attention_stack.max(axis=0)
-    elif pooling_method == "mean":
-        pooled_attention = attention_stack.mean(axis=0)
-    elif pooling_method == "sum":
-        pooled_attention = attention_stack.sum(axis=0)
-    elif pooling_method == "logsumexp":
-        from scipy.special import logsumexp
-
-        pooled_attention = logsumexp(attention_stack, axis=0)
-    else:
-        raise ValueError(f"Unknown pooling method: {pooling_method}")
+    pooled_attention = _pool_layer_attentions(attention_stack, pooling_method)
 
     # Shape after pooling: [n_chars, n_path_points]
 
@@ -577,18 +589,7 @@ def create_attention_timeline_plot(
     # Pool attention across all layers
     attention_stack = np.stack([attn for attn in layer_attentions.values()], axis=0)
 
-    if pooling_method == "max":
-        pooled_attention = attention_stack.max(axis=0)
-    elif pooling_method == "mean":
-        pooled_attention = attention_stack.mean(axis=0)
-    elif pooling_method == "sum":
-        pooled_attention = attention_stack.sum(axis=0)
-    elif pooling_method == "logsumexp":
-        from scipy.special import logsumexp
-
-        pooled_attention = logsumexp(attention_stack, axis=0)
-    else:
-        raise ValueError(f"Unknown pooling method: {pooling_method}")
+    pooled_attention = _pool_layer_attentions(attention_stack, pooling_method)
 
     # Filter attention to valid indices
     if path_mask is not None:

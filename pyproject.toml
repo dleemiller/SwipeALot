@@ -43,6 +43,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = ["archive"]
 
 [tool.ruff.lint]
 select = [
