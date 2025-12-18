@@ -315,56 +315,5 @@ class SwipeLoss(nn.Module):
         return losses
 
 
-class MultipleNegativesRankingLoss(nn.Module):
-    """
-    Multiple Negatives Ranking Loss for cross-encoder training.
-
-    Used for training with (anchor, positive, negative_1, ..., negative_n) tuples.
-    Implemented as CrossEntropyLoss where the positive is always at index 0.
-
-    Based on SBERT's implementation for cross-encoders.
-    Reference: https://github.com/UKPLab/sentence-transformers
-    """
-
-    def __init__(self, scale: float = 10.0, activation_fn: nn.Module | None = None):
-        """
-        Initialize MNR loss.
-
-        Args:
-            scale: Output of similarity function is multiplied by scale value (default: 10.0)
-            activation_fn: Activation function applied to logits before scaling (default: Sigmoid)
-        """
-        super().__init__()
-        self.scale = scale
-        self.activation_fn = activation_fn if activation_fn is not None else nn.Sigmoid()
-        self.cross_entropy = nn.CrossEntropyLoss()
-
-    def forward(self, scores: torch.Tensor, labels: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Compute MNR loss.
-
-        Args:
-            scores: [batch, 1+N] similarity scores
-                    First column is positive pair, rest are negatives
-            labels: [batch] labels (all zeros, indicating positive is at index 0)
-                    If None, will be created automatically
-
-        Returns:
-            Scalar loss
-        """
-        # Apply activation function (SBERT uses Sigmoid by default)
-        if self.activation_fn:
-            scores = self.activation_fn(scores)
-
-        # Apply temperature scaling
-        if self.scale:
-            scores = scores * self.scale
-
-        # Create labels if not provided (positive always at index 0)
-        if labels is None:
-            labels = torch.zeros(scores.size(0), dtype=torch.long, device=scores.device)
-
-        # CrossEntropyLoss: maximize probability of index 0 (positive)
-        loss = self.cross_entropy(scores, labels)
-
-        return loss
+# Legacy note: the cross-encoder `MultipleNegativesRankingLoss` lives in
+# `archive/cross_encoder/training/loss.py` (archived cross-encoder stack).
