@@ -68,36 +68,6 @@ class PathPredictionHead(nn.Module):
         return features
 
 
-class ClassificationHead(nn.Module):
-    """
-    Classification head for cross-encoder.
-
-    Follows SBERT architecture: Dense → GELU → LayerNorm → Linear(→1)
-    Outputs a single similarity score per input.
-    """
-
-    def __init__(self, d_model: int, num_labels: int = 1):
-        super().__init__()
-        self.dense = nn.Linear(d_model, d_model)
-        self.activation = nn.GELU()
-        self.norm = nn.LayerNorm(d_model)
-        self.classifier = nn.Linear(d_model, num_labels)
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            features: [batch, d_model] - typically SEP token embeddings
-
-        Returns:
-            [batch, num_labels] similarity scores
-        """
-        x = self.dense(features)
-        x = self.activation(x)  # GELU
-        x = self.norm(x)  # LayerNorm
-        logits = self.classifier(x)  # [batch, 1] or [batch, num_labels]
-        return logits
-
-
 class LengthPredictionHead(nn.Module):
     """Regress sequence length (e.g., swipable character count) from CLS embedding."""
 
