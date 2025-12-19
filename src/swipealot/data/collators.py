@@ -5,12 +5,8 @@ from typing import Any
 
 import torch
 
+from ..text_utils import swipable_length
 from .tokenizer import CharacterTokenizer
-
-
-def _swipable_length(word: str, max_len: int) -> int:
-    length = sum(1 for c in word.lower() if c.isalpha() or c.isdigit())
-    return min(length, max_len)
 
 
 def _mask_contiguous_blocks_1d(
@@ -391,7 +387,7 @@ class MaskedCollator:
         # Length targets are always available from the word string (used for metrics and optional loss).
         max_len = char_tokens.shape[1]
         result["length_target"] = torch.tensor(
-            [_swipable_length(item["word"], max_len) for item in batch], dtype=torch.long
+            [swipable_length(item["word"], max_len=max_len) for item in batch], dtype=torch.long
         )
         result["length_supervise_mask"] = torch.ones(len(batch), dtype=torch.long)
 
@@ -644,7 +640,7 @@ class PairwiseMaskedCollator:
             views_path_mask_indices.append(path_mask_a)
             pair_ids.append(pair_id)
             gradient_mask.append(gradient_a)
-            length_targets.append(_swipable_length(item["word"], char_tokens.shape[0]))
+            length_targets.append(swipable_length(item["word"], max_len=char_tokens.shape[0]))
             length_supervise_mask.append(length_supervise)
 
             # Create View B (key)
@@ -673,7 +669,7 @@ class PairwiseMaskedCollator:
             views_path_mask_indices.append(path_mask_indices_b)
             pair_ids.append(pair_id)
             gradient_mask.append(gradient_b)
-            length_targets.append(_swipable_length(item["word"], char_tokens.shape[0]))
+            length_targets.append(swipable_length(item["word"], max_len=char_tokens.shape[0]))
             length_supervise_mask.append(0)  # never supervise on key
 
         result = {
@@ -735,7 +731,7 @@ class ValidationCollator:
         words = [item["word"] for item in batch]
         max_len = char_tokens.shape[1]
         length_target = torch.tensor(
-            [_swipable_length(w, max_len) for w in words], dtype=torch.long
+            [swipable_length(w, max_len=max_len) for w in words], dtype=torch.long
         )
 
         return {

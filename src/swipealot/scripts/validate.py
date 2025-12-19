@@ -17,6 +17,8 @@ from datasets import load_dataset
 from sklearn.metrics import accuracy_score, confusion_matrix
 from tqdm import tqdm
 
+from swipealot.text_utils import swipable_length
+
 
 def load_model_and_processor(model_path: Path):
     """Load HuggingFace model and processor."""
@@ -62,7 +64,7 @@ def test_length_prediction(model, processor, device, dataset_name: str, n_sample
         for item in tqdm(test_data, desc="Testing"):
             word = item["word"]
             # Count only alphanumeric characters (matching training)
-            true_length = sum(1 for c in word.lower() if c.isalpha() or c.isdigit())
+            true_length = swipable_length(word)
 
             # Process input (path only, no text)
             inputs = processor(path_coords=item["data"], text=None, return_tensors="pt")

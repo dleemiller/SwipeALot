@@ -18,15 +18,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-
-def _swipable_length(word: str) -> int:
-    """Match training: count only alphanumeric characters (letters + digits)."""
-    return sum(1 for c in word.lower() if c.isalpha() or c.isdigit())
-
-
-def _swipable_text(text: str) -> str:
-    """Normalize for swipe evaluation: lowercase and keep only letters/digits."""
-    return "".join(c for c in text.lower() if c.isalpha() or c.isdigit())
+from swipealot.text_utils import swipable_length, swipable_text
 
 
 def _safe_token(tokenizer, token_id: int) -> str:
@@ -232,7 +224,7 @@ def evaluate_masked_tokens(
                 except ValueError:
                     eos_pos = len(target_ids)
 
-                target_swipable = _swipable_text(target_word)
+                target_swipable = swipable_text(target_word)
 
                 # Reconstruct by only changing masked positions.
                 recon_ids = target_ids[:eos_pos]
@@ -242,11 +234,11 @@ def evaluate_masked_tokens(
                     if is_masked:
                         recon_ids[pos] = int(pred_seq[pos])
 
-                pred_swipable = _swipable_text(tokenizer.decode(recon_ids))
+                pred_swipable = swipable_text(tokenizer.decode(recon_ids))
                 if pred_swipable == target_swipable:
                     word_correct += 1
 
-                pred_argmax_swipable = _swipable_text(tokenizer.decode(pred_seq))
+                pred_argmax_swipable = swipable_text(tokenizer.decode(pred_seq))
                 if pred_argmax_swipable == target_swipable:
                     word_correct_argmax += 1
 
@@ -743,7 +735,7 @@ def evaluate_length(
 
             length_pred = length_logits.reshape(-1).detach().cpu().numpy().astype(np.float64)
             preds.extend(length_pred.tolist())
-            targets.extend([_swipable_length(w) for w in words])
+            targets.extend([swipable_length(w) for w in words])
 
     pred_arr = np.array(preds, dtype=np.float64)
     tgt_arr = np.array(targets, dtype=np.float64)
@@ -802,7 +794,7 @@ def evaluate_length_dataset(
 
             length_pred = length_logits.reshape(-1).detach().cpu().numpy().astype(np.float64)
             preds.extend(length_pred.tolist())
-            targets.extend([_swipable_length(w) for w in words])
+            targets.extend([swipable_length(w) for w in words])
 
     pred_arr = np.array(preds, dtype=np.float64)
     tgt_arr = np.array(targets, dtype=np.float64)
