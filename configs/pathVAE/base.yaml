@@ -1,0 +1,83 @@
+model:
+  # Pretrained encoder checkpoint (text-only conditioning).
+  encoder_path: "checkpoints/base_20251228_145048/final"
+  freeze_encoder: true
+
+  # Decoder (cross-attention over [SEP] + all text hidden states)
+  decoder_n_layers: 6
+  decoder_n_heads: null   # default: encoder n_heads
+  decoder_d_ff: null      # default: encoder d_ff
+  dropout: null           # default: encoder dropout
+
+  # Output distribution (Gaussian in [0,1])
+  out_dim: 2              # x,y
+  sigma_min: 0.001
+  target_eps: 0.0001      # clamp labels to (eps, 1-eps) before loss
+  path_loss_radial_weight: 0.5
+  path_sigma_target_min: 0.01
+  path_sigma_target_max: 0.05
+  uncertainty_reg_weight: 0.001
+
+  # CVAE latent
+  latent_dim: 16
+  latent_hidden_dim: null
+  kl_weight: 0.1
+  smoothness_weight: 0.0
+  smoothness_order: 2
+  speed_smoothness_weight: 0.0
+
+  # Spline control-point decoding
+  spline_enabled: true
+  spline_num_ctrl: 24
+  spline_degree: 3
+  spline_adaptive: false
+  spline_min_ctrl: 12
+  spline_max_ctrl: 32
+  spline_ctrl_per_char: 0.5
+
+  # Path encoder for posterior
+  path_encoder_n_layers: 2
+  path_encoder_n_heads: null
+  path_encoder_d_ff: null
+  path_encoder_dropout: null
+
+data:
+  dataset_name: "futo-org/swipe.futo.org"
+  train_split: "train"
+  val_split: "validation"
+  path_resample_mode: "time"
+  reverse_prob: 0.5
+
+  # Optional dataset slicing (set to null for full split)
+  max_train_samples: null
+  max_eval_samples: 10000
+
+training:
+  training_args:
+    output_dir: "checkpoints/pathVAE"
+    logging_dir: "logs/pathVAE"
+
+    num_train_epochs: 10
+    per_device_train_batch_size: 512
+    per_device_eval_batch_size: 512
+    gradient_accumulation_steps: 1
+
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    warmup_ratio: 0.05
+    lr_scheduler_type: "cosine"
+    max_grad_norm: 1.0
+
+    logging_strategy: "steps"
+    logging_steps: 10
+
+    eval_strategy: "steps"
+    eval_steps: 250
+
+    save_strategy: "steps"
+    save_steps: 250
+    save_total_limit: 2
+    save_safetensors: true
+
+    remove_unused_columns: false
+    report_to: ["tensorboard"]

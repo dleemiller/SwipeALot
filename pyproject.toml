@@ -62,6 +62,7 @@ select = [
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
+    "N812",  # lowercase imported as non-lowercase (allow F for torch.nn.functional)
 ]
 
 [tool.ruff.format]

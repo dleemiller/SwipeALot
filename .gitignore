@@ -208,3 +208,6 @@ __marimo__/
 
 checkpoints
 logs
+
+.hf_cache/
+.hf_home/
