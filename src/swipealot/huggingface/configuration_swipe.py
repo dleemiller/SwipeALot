@@ -22,6 +22,8 @@ class SwipeTransformerConfig(PretrainedConfig):
         max_char_len (int, optional): Maximum character sequence length. Defaults to 38.
         path_input_dim (int, optional): Path feature dimension. Defaults to 6 for (x, y, dx, dy, ds, log_dt).
         predict_path (bool, optional): Whether to predict path coordinates. Defaults to True.
+        predict_path_uncertainty (bool, optional): Whether to predict log sigma for path coords.
+            Defaults to False.
         pad_token_id (int, optional): Padding token ID. Defaults to 0.
         cls_token_id (int, optional): CLS token ID. Defaults to 1.
         sep_token_id (int, optional): SEP token ID. Defaults to 2.
@@ -45,6 +47,7 @@ class SwipeTransformerConfig(PretrainedConfig):
         path_input_dim: int = 6,
         predict_char: bool = True,
         predict_path: bool = True,
+        predict_path_uncertainty: bool = False,
         predict_length: bool = True,
         pad_token_id: int = 0,
         cls_token_id: int = 1,
@@ -72,6 +75,7 @@ class SwipeTransformerConfig(PretrainedConfig):
         # Model capabilities
         self.predict_char = predict_char
         self.predict_path = predict_path
+        self.predict_path_uncertainty = predict_path_uncertainty
         self.predict_length = predict_length
 
         # Special tokens

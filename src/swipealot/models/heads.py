@@ -58,7 +58,10 @@ class PathPredictionHead(nn.Module):
         # - ds is non-negative
         # - log_dt is non-negative
         if features.shape[-1] == 6:
-            x_y = torch.sigmoid(features[..., 0:2])
+            # Use sigmoid(2x) to avoid center bias that sigmoid(x) has
+            # Mathematical identity: sigmoid(2x) = 0.5(tanh(x)+1)
+            # The 2x scaling provides steeper gradients, helping escape center attraction
+            x_y = torch.sigmoid(2.0 * features[..., 0:2])
             dx_dy = torch.tanh(features[..., 2:4])
             ds = torch.nn.functional.softplus(features[..., 4:5])
             log_dt = torch.nn.functional.softplus(features[..., 5:6])
@@ -66,6 +69,30 @@ class PathPredictionHead(nn.Module):
 
         # Fallback: unconstrained regression for other output dims.
         return features
+
+
+class PathUncertaintyHead(nn.Module):
+    """Prediction head for log sigma of path coordinates."""
+
+    def __init__(self, d_model: int, output_dim: int = 6):
+        super().__init__()
+        self.dense = nn.Linear(d_model, d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.decoder = nn.Linear(d_model, output_dim)
+        self.activation = nn.GELU()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: [batch, seq_len, d_model]
+
+        Returns:
+            [batch, seq_len, output_dim] log sigma values.
+        """
+        x = self.dense(hidden_states)
+        x = self.activation(x)
+        x = self.layer_norm(x)
+        return self.decoder(x)
 
 
 class LengthPredictionHead(nn.Module):

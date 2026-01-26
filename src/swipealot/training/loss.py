@@ -18,6 +18,11 @@ class SwipeLoss(nn.Module):
         path_loss_dims: list[int] | None = None,
         path_loss_end_weight: float = 1.0,
         path_loss_radial_weight: float = 0.0,
+        path_sigma_min: float = 0.1,
+        path_best_of_k: int = 1,
+        path_sigma_target_min: float = 0.1,
+        path_sigma_target_max: float = 0.4,
+        uncertainty_reg_weight: float = 0.1,
         focal_gamma: float = 0.0,
         char_class_weights: torch.Tensor | None = None,
         contrastive_weight: float = 0.0,
@@ -39,6 +44,18 @@ class SwipeLoss(nn.Module):
         self.path_loss_dims = path_loss_dims[:] if path_loss_dims is not None else None
         self.path_loss_end_weight = float(path_loss_end_weight)
         self.path_loss_radial_weight = float(path_loss_radial_weight)
+        if path_sigma_min <= 0.0:
+            raise ValueError("path_sigma_min must be > 0")
+        self.path_sigma_min = float(path_sigma_min)
+        if path_best_of_k < 1:
+            raise ValueError("path_best_of_k must be >= 1")
+        self.path_best_of_k = int(path_best_of_k)
+
+        # Uncertainty regularization parameters
+        self.path_sigma_target_min = float(path_sigma_target_min)
+        self.path_sigma_target_max = float(path_sigma_target_max)
+        self.uncertainty_reg_weight = float(uncertainty_reg_weight)
+
         self.focal_gamma = focal_gamma
         self.contrastive_weight = contrastive_weight
         self.contrastive_temperature = contrastive_temperature
@@ -61,6 +78,7 @@ class SwipeLoss(nn.Module):
         else:
             self.char_class_weights = None
         self.path_loss_fn = nn.MSELoss(reduction="none")
+        self.path_nll_loss = nn.GaussianNLLLoss(reduction="none", full=True)
 
     def _infonce_from_embeddings(
         self,
@@ -158,7 +176,11 @@ class SwipeLoss(nn.Module):
         return loss_terms.mean()
 
     def _compute_path_loss(
-        self, *, path_pred: torch.Tensor | None, batch: dict[str, torch.Tensor]
+        self,
+        *,
+        path_pred: torch.Tensor | None,
+        path_log_sigma: torch.Tensor | None,
+        batch: dict[str, torch.Tensor],
     ) -> torch.Tensor | None:
         if path_pred is None or batch.get("path_labels") is None:
             return None
@@ -167,6 +189,7 @@ class SwipeLoss(nn.Module):
         path_mask_indices = batch["path_mask_indices"]  # [B, path_len]
         path_len = path_labels.shape[1]
         path_labels_full = path_labels
+        path_log_sigma_subset = None
 
         # Support both:
         # - `path_pred` over the path segment only: [B, path_len, D]
@@ -177,6 +200,13 @@ class SwipeLoss(nn.Module):
             path_start = 1  # Skip [CLS]
             path_end = 1 + path_len
             path_pred_subset = path_pred[:, path_start:path_end, :]
+        if path_log_sigma is not None:
+            if path_log_sigma.shape[1] == path_len:
+                path_log_sigma_subset = path_log_sigma
+            else:
+                path_start = 1  # Skip [CLS]
+                path_end = 1 + path_len
+                path_log_sigma_subset = path_log_sigma[:, path_start:path_end, :]
 
         if self.path_loss_dims is not None:
             dims = [int(d) for d in self.path_loss_dims]
@@ -187,8 +217,28 @@ class SwipeLoss(nn.Module):
                 raise ValueError(f"path_loss_dims {dims} out of range for path_input_dim={max_dim}")
             path_pred_subset = path_pred_subset[..., dims]
             path_labels = path_labels[..., dims]
+            if path_log_sigma_subset is not None:
+                path_log_sigma_subset = path_log_sigma_subset[..., dims]
 
-        path_loss = self.path_loss_fn(path_pred_subset, path_labels)  # [B, path_len, D]
+        if path_log_sigma_subset is None or self.path_best_of_k <= 1:
+            if path_log_sigma_subset is None:
+                path_loss = self.path_loss_fn(path_pred_subset, path_labels)  # [B, path_len, D]
+            else:
+                var = torch.exp(2.0 * path_log_sigma_subset)
+                var = torch.clamp(var, min=self.path_sigma_min * self.path_sigma_min)
+                path_loss = self.path_nll_loss(path_pred_subset, path_labels, var)
+        else:
+            sigma = torch.exp(path_log_sigma_subset)
+            sigma = torch.clamp(sigma, min=self.path_sigma_min)
+            k = self.path_best_of_k
+            eps = torch.randn(
+                (k,) + tuple(sigma.shape),
+                device=sigma.device,
+                dtype=sigma.dtype,
+            )
+            samples = path_pred_subset.unsqueeze(0) + sigma.unsqueeze(0) * eps
+            labels = path_labels.unsqueeze(0).to(dtype=samples.dtype)
+            path_loss = (samples - labels) ** 2  # [K, B, path_len, D]
         weight = path_mask_indices.unsqueeze(-1).float()  # [B, path_len, 1]
 
         if self.path_loss_end_weight != 1.0:
@@ -216,7 +266,13 @@ class SwipeLoss(nn.Module):
             radial_weight = (1.0 + self.path_loss_radial_weight * dist).unsqueeze(-1)
             weight = weight * radial_weight
 
-        path_loss = (path_loss * weight).sum()
+        if path_loss.dim() == 4:
+            weighted = path_loss * weight.unsqueeze(0)
+            per_sample_sum = weighted.sum(dim=(2, 3))  # [K, B]
+            min_sum, _ = per_sample_sum.min(dim=0)  # [B]
+            path_loss = min_sum.sum()
+        else:
+            path_loss = (path_loss * weight).sum()
 
         denom = weight.sum()
         if denom > 0:
@@ -299,14 +355,91 @@ class SwipeLoss(nn.Module):
         path_pred = self._get_output(outputs, "path_logits")
         if path_pred is None:
             path_pred = self._get_output(outputs, "path_coords_pred")
-        path_loss = self._compute_path_loss(path_pred=path_pred, batch=batch)
+        path_log_sigma = self._get_output(outputs, "path_log_sigma")
+        path_loss = self._compute_path_loss(
+            path_pred=path_pred, path_log_sigma=path_log_sigma, batch=batch
+        )
         if path_loss is not None:
             losses["path_loss"] = path_loss
+
+            # Diagnostic metrics for center collapse analysis
+            if path_pred is not None and "path_labels" in batch:
+                path_labels = batch["path_labels"]
+                path_len = path_labels.shape[1]
+
+                # Handle both full sequence and path-only predictions
+                if path_pred.shape[1] == path_len:
+                    path_pred_subset = path_pred
+                else:
+                    path_start = 1  # Skip [CLS]
+                    path_end = 1 + path_len
+                    path_pred_subset = path_pred[:, path_start:path_end, :]
+
+                sigma_for_reg = None
+                if path_log_sigma is not None:
+                    if path_log_sigma.shape[1] == path_len:
+                        sigma_for_reg = torch.exp(path_log_sigma[..., :2])  # x,y only
+                    else:
+                        path_start = 1
+                        path_end = 1 + path_len
+                        sigma_for_reg = torch.exp(path_log_sigma[:, path_start:path_end, :2])
+
+                if sigma_for_reg is not None and self.uncertainty_reg_weight > 0:
+                    full_path_sigma = sigma_for_reg
+                    eps = 1e-8
+                    log_sigma = torch.log(full_path_sigma + eps)
+                    log_sigma_min = torch.log(
+                        torch.tensor(self.path_sigma_target_min, device=log_sigma.device)
+                    )
+                    log_sigma_max = torch.log(
+                        torch.tensor(self.path_sigma_target_max, device=log_sigma.device)
+                    )
+                    too_low_penalty = torch.clamp(log_sigma_min - log_sigma, min=0.0).pow(2)
+                    too_high_penalty = torch.clamp(log_sigma - log_sigma_max, min=0.0).pow(2)
+                    uncertainty_penalty = (too_low_penalty + too_high_penalty).mean()
+                    losses["uncertainty_penalty"] = (
+                        uncertainty_penalty * self.uncertainty_reg_weight
+                    )
+
+                with torch.no_grad():
+                    # Sigma diagnostics by position
+                    if sigma_for_reg is not None and self.training:
+                        sigma = sigma_for_reg.detach()
+
+                        # Compute by terciles
+                        third = path_len // 3
+                        start_sigma = sigma[:, :third].mean()
+                        mid_sigma = sigma[:, third : 2 * third].mean()
+                        end_sigma = sigma[:, -third:].mean()
+
+                        losses["debug/sigma_start"] = start_sigma
+                        losses["debug/sigma_mid"] = mid_sigma
+                        losses["debug/sigma_end"] = end_sigma
+                        losses["debug/sigma_end_to_start_ratio"] = end_sigma / (start_sigma + 1e-8)
+
+                    # Center collapse metrics
+                    center = torch.tensor([0.5, 0.5], device=path_pred_subset.device)
+
+                    # Distance from center by position (x, y coords only)
+                    third = path_pred_subset.shape[1] // 3
+                    start_dist = torch.norm(path_pred_subset[:, :third, :2] - center, dim=-1).mean()
+                    end_dist = torch.norm(path_pred_subset[:, -third:, :2] - center, dim=-1).mean()
+
+                    true_end_dist = torch.norm(path_labels[:, -third:, :2] - center, dim=-1).mean()
+
+                    losses["debug/pred_start_center_dist"] = start_dist
+                    losses["debug/pred_end_center_dist"] = end_dist
+                    losses["debug/true_end_center_dist"] = true_end_dist
+                    losses["debug/collapse_ratio"] = end_dist / (true_end_dist + 1e-8)
 
         # Total loss
         total_loss = self.char_weight * char_loss
         if "path_loss" in losses:
             total_loss = total_loss + self.path_weight * losses["path_loss"]
+
+        # Add uncertainty regularization penalty
+        if "uncertainty_penalty" in losses:
+            total_loss = total_loss + losses["uncertainty_penalty"]
 
         # CLS length prediction (optional)
         has_length_logits = self._get_output(outputs, "length_logits") is not None

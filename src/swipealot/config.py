@@ -31,6 +31,7 @@ class ModelConfig:
     predict_path: bool = True
     predict_char: bool = True  # Core MLM objective (can be disabled with char_loss_weight=0)
     predict_length: bool = True  # Auxiliary CLS head to predict swipable length
+    predict_path_uncertainty: bool = False  # Predict log sigma for path coords
 
 
 @dataclass
@@ -71,6 +72,13 @@ class TrainingConfig:
     path_loss_dims: list[int] | None = None  # e.g. [0,1] to supervise x/y only
     path_loss_end_weight: float = 1.0  # Linear ramp weight applied from start->end
     path_loss_radial_weight: float = 0.0  # Extra weight for points farther from center
+    path_sigma_min: float = 0.1  # Variance floor for heteroscedastic path loss
+    path_best_of_k: int = 1  # Use best-of-K MSE when log sigma is available (K>=1)
+
+    # Uncertainty regularization (Phase 3: prevent late-stage collapse)
+    path_sigma_target_min: float = 0.1  # Target healthy range lower bound for endpoint sigma
+    path_sigma_target_max: float = 0.4  # Target healthy range upper bound for endpoint sigma
+    uncertainty_reg_weight: float = 0.1  # Weight for uncertainty regularization loss
 
     # Custom loss settings
     use_focal_loss: bool = False
@@ -93,6 +101,7 @@ class TrainingConfig:
     )
     pairwise_right_half_path_prob: Any = (0.6, 0.8)
     pairwise_right_half_reverse_prob: float = 0.0
+    pairwise_inverted_reverse_prob: float = 0.0
     contrastive_weight: float = 0.0
     contrastive_temperature: float = 0.1
 
