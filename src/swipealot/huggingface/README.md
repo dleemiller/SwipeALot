@@ -25,6 +25,7 @@ The default output type is `SwipeTransformerOutput` and includes:
 
 - `char_logits`: `[batch, char_len, vocab_size]` (text segment only; no logits for path/CLS/SEP).
 - `path_logits`: `[batch, path_len, path_input_dim]` (path segment only).
+- `path_log_sigma`: `[batch, path_len, path_input_dim]` (log sigma for path coords when enabled).
 - `length_logits`: `[batch]` (regressed length from CLS).
 - `pooler_output`: `[batch, d_model]` (SEP embedding used for contrastive/similarity).
 - `attentions`: per-layer attention weights when `output_attentions=True`.

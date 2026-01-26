@@ -308,14 +308,15 @@ def create_summary_visualization(
     save_path: str | None = None,
     path_mask: np.ndarray | None = None,
 ) -> plt.Figure:
-    """Create a compact summary figure (3 layers × 3 characters)."""
-    fig = plt.figure(figsize=(18, 12))
+    """Create a compact summary figure (n layers × 3 characters)."""
+    layer_ids = sorted(layer_attentions.keys())
+    n_layers = max(len(layer_ids), 1)
+    fig = plt.figure(figsize=(6 * n_layers, 12))
 
     # Create grid
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+    gs = fig.add_gridspec(3, n_layers, hspace=0.3, wspace=0.3)
 
     # Compute global min/max for normalization
-    layer_ids = sorted(layer_attentions.keys())
     char_indices_to_plot = [0, min(1, len(word) - 1), min(2, len(word) - 1)]
 
     global_vmin = float("inf")
@@ -622,8 +623,6 @@ def create_attention_timeline_plot(
     # Compute max and mean across characters
     all_attention_stack = np.stack([pooled_attention[i, :] for i in range(len(word))], axis=0)
     max_attention_all = all_attention_stack.max(axis=0)
-    mean_attention_all = all_attention_stack.mean(axis=0)
-
     # Plot max across all tokens (black dashed)
     ax.plot(
         times,
@@ -638,22 +637,6 @@ def create_attention_timeline_plot(
         # markeredgewidth=0,
         # markeredgecolor='white',
         zorder=10,  # Draw on top
-    )
-
-    # Plot mean across all tokens (red solid)
-    ax.plot(
-        times,
-        mean_attention_all,
-        linewidth=3,
-        label="Mean across all tokens",
-        color="red",
-        alpha=0.9,
-        linestyle="-",
-        marker="o",
-        markersize=5,
-        markeredgewidth=0.5,
-        markeredgecolor="white",
-        zorder=9,  # Draw on top but below max
     )
 
     # Formatting

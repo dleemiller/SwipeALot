@@ -117,3 +117,80 @@ def test_path_loss_dims_can_restrict_to_xy_only():
         },
     )
     assert losses2["path_loss"].item() > 0.0
+
+
+def test_path_loss_radial_weight_scales_with_distance():
+    loss_fn = SwipeLoss(
+        char_weight=0.0,
+        path_weight=1.0,
+        path_loss_dims=[0, 1],
+        path_loss_radial_weight=1.0,
+    )
+
+    batch_size = 1
+    path_len = 2
+    dim = 6
+
+    path_mask_indices = torch.ones(batch_size, path_len, dtype=torch.long)
+
+    labels = torch.zeros(batch_size, path_len, dim)
+    labels[0, 0, 0] = 0.5
+    labels[0, 0, 1] = 0.5
+    labels[0, 1, 0] = 1.0
+    labels[0, 1, 1] = 1.0
+
+    center_pred = labels.clone()
+    center_pred[0, 0, 0] = center_pred[0, 0, 0] + 0.1
+    center_loss = loss_fn(
+        {"path_logits": center_pred},
+        {
+            "path_coords": torch.zeros(batch_size, path_len, dim),
+            "path_labels": labels,
+            "path_mask_indices": path_mask_indices,
+        },
+    )["path_loss"]
+
+    corner_pred = labels.clone()
+    corner_pred[0, 1, 0] = corner_pred[0, 1, 0] + 0.1
+    corner_loss = loss_fn(
+        {"path_logits": corner_pred},
+        {
+            "path_coords": torch.zeros(batch_size, path_len, dim),
+            "path_labels": labels,
+            "path_mask_indices": path_mask_indices,
+        },
+    )["path_loss"]
+
+    assert corner_loss.item() > center_loss.item()
+
+
+def test_path_loss_uses_log_sigma_when_provided():
+    loss_fn = SwipeLoss(char_weight=0.0, path_weight=1.0, path_loss_dims=[0, 1])
+
+    batch_size = 1
+    path_len = 2
+    dim = 6
+
+    path_labels = torch.zeros(batch_size, path_len, dim)
+    path_pred = path_labels.clone()
+    path_mask_indices = torch.ones(batch_size, path_len, dtype=torch.long)
+
+    batch = {
+        "path_coords": torch.zeros(batch_size, path_len, dim),
+        "path_labels": path_labels,
+        "path_mask_indices": path_mask_indices,
+    }
+
+    log_sigma_zero = torch.zeros(batch_size, path_len, dim)
+    loss_zero = loss_fn(
+        {"path_logits": path_pred, "path_log_sigma": log_sigma_zero},
+        batch,
+    )["path_loss"]
+
+    log_sigma_one = torch.ones(batch_size, path_len, dim)
+    loss_one = loss_fn(
+        {"path_logits": path_pred, "path_log_sigma": log_sigma_one},
+        batch,
+    )["path_loss"]
+
+    assert loss_one.item() > loss_zero.item()

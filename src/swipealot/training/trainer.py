@@ -165,6 +165,20 @@ class SwipeTrainer(Trainer):
             for key, value in losses.items():
                 if key != "total_loss":
                     self.log({f"train/{key}": value.item()})
+            if (
+                hasattr(self.data_collator, "stats")
+                and getattr(self.args, "dataloader_num_workers", 0) == 0
+            ):
+                stats = self.data_collator.stats.summarize()
+                for mode, values in stats.items():
+                    self.log(
+                        {
+                            f"masking/{mode}_count": values.get("count", 0.0),
+                            f"masking/{mode}_path_frac": values.get("path_mask_frac_mean", 0.0),
+                            f"masking/{mode}_char_frac": values.get("char_mask_frac_mean", 0.0),
+                        }
+                    )
+                self.data_collator.stats.reset()
 
         return (loss, outputs) if return_outputs else loss
 

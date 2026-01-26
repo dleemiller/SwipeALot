@@ -22,6 +22,8 @@ class SwipeTransformerOutput(ModelOutput):
             Prediction scores of the character prediction head (text segment only).
         path_logits (`torch.FloatTensor` of shape `(batch_size, path_length, path_input_dim)`, *optional*):
             Prediction scores of the path prediction head (path segment only, if enabled).
+        path_log_sigma (`torch.FloatTensor` of shape `(batch_size, path_length, path_input_dim)`, *optional*):
+            Predicted log sigma for path coordinates (path segment only, if enabled).
         length_logits (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
             Predicted length from the length head (if enabled).
         last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
@@ -39,6 +41,7 @@ class SwipeTransformerOutput(ModelOutput):
     loss: torch.FloatTensor | None = None
     char_logits: torch.FloatTensor | None = None
     path_logits: torch.FloatTensor | None = None
+    path_log_sigma: torch.FloatTensor | None = None
     length_logits: torch.FloatTensor | None = None
     last_hidden_state: torch.FloatTensor | None = None
     pooler_output: torch.FloatTensor | None = None
@@ -88,7 +91,12 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         # Import existing components
         from ..models.embeddings import MixedEmbedding
-        from ..models.heads import CharacterPredictionHead, LengthPredictionHead, PathPredictionHead
+        from ..models.heads import (
+            CharacterPredictionHead,
+            LengthPredictionHead,
+            PathPredictionHead,
+            PathUncertaintyHead,
+        )
 
         # Embeddings
         self.embeddings = MixedEmbedding(
@@ -130,8 +138,14 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
             self.path_head = PathPredictionHead(
                 d_model=config.d_model, output_dim=config.path_input_dim
             )
+            self.path_log_sigma_head = (
+                PathUncertaintyHead(d_model=config.d_model, output_dim=config.path_input_dim)
+                if config.predict_path_uncertainty
+                else None
+            )
         else:
             self.path_head = None
+            self.path_log_sigma_head = None
 
         # Length prediction head (predicts word length from path)
         # Max length is max_char_len (including EOS)
@@ -258,7 +272,13 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
         *,
         path_len: int,
         char_len: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+    ]:
         char_logits = None
         if self.char_head is not None:
             char_start = 1 + path_len + 1
@@ -266,16 +286,19 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
             char_logits = self.char_head(char_hidden)
 
         path_logits = None
+        path_log_sigma = None
         if self.path_head is not None:
             path_hidden = hidden_states[:, 1 : 1 + path_len, :]
             path_logits = self.path_head(path_hidden)
+            if self.path_log_sigma_head is not None:
+                path_log_sigma = self.path_log_sigma_head(path_hidden)
 
         cls_hidden = hidden_states[:, 0, :]
         length_logits = self.length_head(cls_hidden) if self.length_head is not None else None
 
         sep_position = 1 + path_len
         pooler_output = hidden_states[:, sep_position, :]
-        return char_logits, path_logits, length_logits, pooler_output
+        return char_logits, path_logits, path_log_sigma, length_logits, pooler_output
 
     def _char_loss(
         self,
@@ -326,6 +349,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
                 - loss: Optional loss value
                 - char_logits: Character prediction logits [batch, char_len, vocab_size] (if enabled)
                 - path_logits: Path prediction logits [batch, path_len, path_input_dim] (if enabled)
+                - path_log_sigma: Path log sigma [batch, path_len, path_input_dim] (if enabled)
                 - length_logits: Length regression output [batch] (if enabled)
                 - last_hidden_state: Hidden states [batch, seq_len, d_model]
                 - pooler_output: SEP token embedding [batch, d_model] for similarity/embedding tasks
@@ -365,7 +389,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
 
         path_len = int(path_coords.shape[1])
         char_len = int(input_ids.shape[1])
-        char_logits, path_logits, length_logits, pooler_output = self._heads(
+        char_logits, path_logits, path_log_sigma, length_logits, pooler_output = self._heads(
             hidden_states,
             path_len=path_len,
             char_len=char_len,
@@ -386,6 +410,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
                 pooler_output,
                 all_hidden_states,
                 attentions,
+                path_log_sigma,
             )
             return (loss,) + output if loss is not None else output
 
@@ -393,6 +418,7 @@ class SwipeTransformerModel(SwipeTransformerPreTrainedModel):
             loss=loss,
             char_logits=char_logits,
             path_logits=path_logits,
+            path_log_sigma=path_log_sigma,
             length_logits=length_logits,
             last_hidden_state=hidden_states,
             pooler_output=pooler_output,
