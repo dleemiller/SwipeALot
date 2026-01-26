@@ -128,41 +128,69 @@ def test_path_loss_radial_weight_scales_with_distance():
     )
 
     batch_size = 1
-    path_len = 1
+    path_len = 2
     dim = 6
 
     path_mask_indices = torch.ones(batch_size, path_len, dtype=torch.long)
 
-    # Center point: distance=0 -> baseline weight
-    center_labels = torch.zeros(batch_size, path_len, dim)
-    center_labels[0, 0, 0] = 0.5
-    center_labels[0, 0, 1] = 0.5
-    center_pred = center_labels.clone()
-    center_pred[0, 0, 0] = center_pred[0, 0, 0] + 0.1
+    labels = torch.zeros(batch_size, path_len, dim)
+    labels[0, 0, 0] = 0.5
+    labels[0, 0, 1] = 0.5
+    labels[0, 1, 0] = 1.0
+    labels[0, 1, 1] = 1.0
 
+    center_pred = labels.clone()
+    center_pred[0, 0, 0] = center_pred[0, 0, 0] + 0.1
     center_loss = loss_fn(
         {"path_logits": center_pred},
         {
             "path_coords": torch.zeros(batch_size, path_len, dim),
-            "path_labels": center_labels,
+            "path_labels": labels,
             "path_mask_indices": path_mask_indices,
         },
     )["path_loss"]
 
-    # Corner point: max distance -> higher weight for same error magnitude
-    corner_labels = torch.zeros(batch_size, path_len, dim)
-    corner_labels[0, 0, 0] = 1.0
-    corner_labels[0, 0, 1] = 1.0
-    corner_pred = corner_labels.clone()
-    corner_pred[0, 0, 0] = corner_pred[0, 0, 0] + 0.1
-
+    corner_pred = labels.clone()
+    corner_pred[0, 1, 0] = corner_pred[0, 1, 0] + 0.1
     corner_loss = loss_fn(
         {"path_logits": corner_pred},
         {
             "path_coords": torch.zeros(batch_size, path_len, dim),
-            "path_labels": corner_labels,
+            "path_labels": labels,
             "path_mask_indices": path_mask_indices,
         },
     )["path_loss"]
 
     assert corner_loss.item() > center_loss.item()
+
+
+def test_path_loss_uses_log_sigma_when_provided():
+    loss_fn = SwipeLoss(char_weight=0.0, path_weight=1.0, path_loss_dims=[0, 1])
+
+    batch_size = 1
+    path_len = 2
+    dim = 6
+
+    path_labels = torch.zeros(batch_size, path_len, dim)
+    path_pred = path_labels.clone()
+    path_mask_indices = torch.ones(batch_size, path_len, dtype=torch.long)
+
+    batch = {
+        "path_coords": torch.zeros(batch_size, path_len, dim),
+        "path_labels": path_labels,
+        "path_mask_indices": path_mask_indices,
+    }
+
+    log_sigma_zero = torch.zeros(batch_size, path_len, dim)
+    loss_zero = loss_fn(
+        {"path_logits": path_pred, "path_log_sigma": log_sigma_zero},
+        batch,
+    )["path_loss"]
+
+    log_sigma_one = torch.ones(batch_size, path_len, dim)
+    loss_one = loss_fn(
+        {"path_logits": path_pred, "path_log_sigma": log_sigma_one},
+        batch,
+    )["path_loss"]
+
+    assert loss_one.item() > loss_zero.item()

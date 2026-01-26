@@ -4,7 +4,8 @@
 Usage:
     uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word-index 10
     uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word "hello"
-    uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word-index 10 --layers 0 6 11
+    uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word-index 10 --last-k-layers 3
+    uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word-index 10 --layers 2 3 4 5 6 11
 """
 
 import argparse
@@ -26,6 +27,23 @@ from swipealot.analysis import (
 from swipealot.analysis.attention_capture import get_all_layer_attentions
 
 
+def _apply_temperature(
+    attn: torch.Tensor,
+    path_mask: torch.Tensor,
+    temperature: float,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    if temperature == 1.0:
+        return attn
+    masked = attn * path_mask.view(1, 1, -1).to(attn.dtype)
+    row_sum = masked.sum(dim=-1, keepdim=True)
+    safe_sum = row_sum.clamp_min(eps)
+    p = masked / safe_sum
+    logp = torch.log(p.clamp_min(eps))
+    p_t = torch.softmax(logp / float(temperature), dim=-1)
+    return p_t * row_sum
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate attention visualizations for swipe keyboard model",
@@ -38,8 +56,11 @@ Examples:
   # Visualize specific word
   uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word "hello"
 
-  # Specify custom layers and output directory
-  uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word-index 5 --layers 0 6 11 --output visualizations/attention/custom
+  # Specify last-k layers, temperature, and output directory
+  uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word-index 5 --last-k-layers 3 --temperature 0.6 --output visualizations/attention/custom
+
+  # Specify explicit layers for comparison
+  uv run attention-map --checkpoint checkpoints/base_20251217_113408/checkpoint-10 --word-index 5 --layers 2 3 4 5 6 11 --temperature 0.6 --output visualizations/attention/custom
         """,
     )
 
@@ -63,12 +84,25 @@ Examples:
         help="Specific word to find and visualize in validation set",
     )
 
-    parser.add_argument(
+    layer_group = parser.add_mutually_exclusive_group()
+    layer_group.add_argument(
+        "--last-k-layers",
+        type=int,
+        default=3,
+        help="Use the last K transformer layers for layer comparison (default: 3)",
+    )
+    layer_group.add_argument(
         "--layers",
         type=int,
         nargs="+",
-        default=[0, 6, 11],
-        help="Transformer layers to visualize (default: 0 6 11)",
+        help="Explicit transformer layers to visualize",
+    )
+
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sharpen attention over path points (<1.0 sharper, >1.0 flatter)",
     )
 
     parser.add_argument(
@@ -104,7 +138,7 @@ Examples:
         "--num-samples",
         type=int,
         default=100000,
-        help="Number of samples to load from dataset when searching by word (default: 1000)",
+        help="Number of samples to load from dataset when searching by word (default: 100000)",
     )
 
     args = parser.parse_args()
@@ -198,8 +232,9 @@ Examples:
     print(f"   Model path_len={path_len}, char_len={char_len}")
 
     # Extract masks for plotting
-    attn_mask = inputs["attention_mask"][0].detach().cpu()
-    path_mask = attn_mask[1 : 1 + path_len].numpy()
+    attn_mask = inputs["attention_mask"][0]
+    path_mask_tensor = attn_mask[1 : 1 + path_len]
+    path_mask = path_mask_tensor.detach().cpu().numpy()
 
     # 6. Extract attention from all layers (native HF output_attentions if available, else hook capture)
     print(f"\n6. Extracting attention from all {config.n_layers} layers...")
@@ -210,6 +245,9 @@ Examples:
     for layer_idx, attn in enumerate(attentions):
         char_to_path = extract_path_to_char_attention(
             attn, path_len=path_len, char_len=char_len, aggregation=args.aggregation
+        )
+        char_to_path = _apply_temperature(
+            char_to_path, path_mask_tensor, temperature=args.temperature
         )[0]  # remove batch dim
         # Restrict to actual characters in the provided word (exclude EOS + padding)
         n_chars = min(len(word), char_len)
@@ -217,8 +255,21 @@ Examples:
 
     print(f"   Extracted char→path attention for {len(all_layer_attentions)} layers")
 
-    # Also keep attention for specified layers for comparison visualization
-    layer_attentions = {k: v for k, v in all_layer_attentions.items() if k in args.layers}
+    # Also keep attention for selected layers for comparison visualization
+    if args.layers is not None:
+        layer_indices = [idx for idx in args.layers if 0 <= idx < len(all_layer_attentions)]
+        if not layer_indices:
+            print(
+                "Error: --layers did not include any valid indices for this model",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        layer_indices = sorted(set(layer_indices))
+        last_k = None
+    else:
+        last_k = min(max(int(args.last_k_layers), 1), len(all_layer_attentions))
+        layer_indices = list(range(len(all_layer_attentions) - last_k, len(all_layer_attentions)))
+    layer_attentions = {k: all_layer_attentions[k] for k in layer_indices}
     print(f"   Using layers {list(layer_attentions.keys())} for layer comparison grid")
 
     # 7. Create visualizations
@@ -272,6 +323,20 @@ Examples:
     print(f"     Saved to: {pooled_path}")
     plt.close(fig3)
 
+    # Layer-pooled visualization (selected layers only)
+    print(f"   - Selected-layer pooled visualization ({args.aggregation})...")
+    selected_pooled_path = output_dir / f"{word}_layer_pooled_selected_{args.aggregation}.png"
+    fig3b = create_layer_pooled_visualization(
+        layer_attentions=layer_attentions,
+        path_coords=inputs["path_coords"][0].detach().cpu().numpy(),
+        word=word,
+        pooling_method=args.aggregation,
+        save_path=str(selected_pooled_path),
+        path_mask=np.array(path_mask),
+    )
+    print(f"     Saved to: {selected_pooled_path}")
+    plt.close(fig3b)
+
     # Timeline plot (attention vs time for each character)
     print("   - Timeline plot (attention vs time for each character)...")
     timeline_path = output_dir / f"{word}_timeline_{args.aggregation}.png"
@@ -285,6 +350,20 @@ Examples:
     )
     print(f"     Saved to: {timeline_path}")
     plt.close(fig4)
+
+    # Timeline plot (selected layers only)
+    print("   - Selected-layer timeline plot...")
+    selected_timeline_path = output_dir / f"{word}_timeline_selected_{args.aggregation}.png"
+    fig4b = create_attention_timeline_plot(
+        layer_attentions=layer_attentions,
+        path_coords=inputs["path_coords"][0].detach().cpu().numpy(),
+        word=word,
+        pooling_method=args.aggregation,
+        save_path=str(selected_timeline_path),
+        path_mask=np.array(path_mask),
+    )
+    print(f"     Saved to: {selected_timeline_path}")
+    plt.close(fig4b)
 
     # Per-layer timeline plots
     print(f"   - Per-layer timeline plots (all {len(all_layer_attentions)} layers)...")
@@ -309,12 +388,19 @@ Examples:
     print("✓ Visualization complete!")
     print(f"  Word: '{word}'")
     print(f"  Aggregation: {args.aggregation}")
+    if last_k is None:
+        print(f"  Layers: {layer_indices}")
+    else:
+        print(f"  Last-k layers: {last_k}")
+    print(f"  Temperature: {args.temperature}")
     print(f"  Output directory: {output_dir}")
     print("  Files created:")
     print(f"    - {grid_path.name}")
     print(f"    - {summary_path.name}")
     print(f"    - {pooled_path.name}")
+    print(f"    - {selected_pooled_path.name}")
     print(f"    - {timeline_path.name}")
+    print(f"    - {selected_timeline_path.name}")
     print(f"    - {len(per_layer_paths)} per-layer timeline plots")
     print("=" * 70)
 

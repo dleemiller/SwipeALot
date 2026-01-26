@@ -26,7 +26,12 @@ train = "swipealot.scripts.train:main"
 evaluate = "swipealot.scripts.evaluate:main"
 attention-map = "swipealot.scripts.attention_map:main"
 attention-grid = "swipealot.scripts.attention_grid:main"
+attention-fit = "swipealot.scripts.attention_timeline_fit:main"
+letter-positions = "swipealot.scripts.letter_positions:main"
+train-pathvae = "swipealot.downstream.pathVAE.train:main"
 validate = "swipealot.scripts.validate:main"
+train-text2path = "swipealot.downstream.text2path.train:main"
+train-path-diffusion = "swipealot.downstream.path_diffusion.train:main"
 
 [project.optional-dependencies]
 cu128 = [
