@@ -211,3 +211,33 @@ logs
 
 .hf_cache/
 .hf_home/
+
+# Downstream modules not yet ready for commit
+src/swipealot/downstream/path_diffusion/
+
+# Local scripts / artifacts
+check_metrics.py
+list_metrics.py
+fit_endpoint_distributions.py
+visualize_endpoint_distributions.py
+endpoint_distributions.pkl
+test.csv
+profiling_results/
+visualizations/
+demo/
+demos/
+examples/
+
+# Manual verification scripts (require real data / checkpoints)
+tests/test_6d_simple.py
+tests/test_checkpoint_loading.py
+
+# Documentation (branch-local)
+BRANCH_STATUS.md
+ENCODER_OBJECTIVES.md
+PATHVAE.md
+TEXT2PATH.md
+TODO.md
+
+# Lock file
+uv.lock
