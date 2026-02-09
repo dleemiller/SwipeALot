@@ -40,11 +40,7 @@ class SwipeProcessor(ProcessorMixin):
         self.max_char_len = max_char_len
         self.path_input_dim = path_input_dim
         self.path_resample_mode = path_resample_mode
-        # Attributes expected by newer transformers (not used for swipe models)
         self.chat_template = None
-        self.audio_tokenizer = None
-        self.feature_extractor = None
-        self.image_processor = None
 
     def __call__(
         self,
