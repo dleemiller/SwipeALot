@@ -25,7 +25,7 @@ class ModelConfig:
     max_char_len: int = 38
 
     # Path features
-    path_input_dim: int = 6  # (x, y, dx, dy, ds, log_dt)
+    path_input_dim: int = 8  # (x, y, dx, dy, d2x, d2y, speed, curvature)
 
     # Tasks
     predict_path: bool = True
