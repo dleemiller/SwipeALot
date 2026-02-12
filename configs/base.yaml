@@ -7,7 +7,7 @@ model:
   vocab_size: 100  # will be set from tokenizer
   max_path_len: 128
   max_char_len: 48
-  path_input_dim: 6  # (x, y, dx, dy, ds, log_dt)
+  path_input_dim: 8  # (x, y, dx, dy, d2x, d2y, speed, curvature)
   predict_path: true
   predict_path_uncertainty: true
   predict_length: true

@@ -64,6 +64,7 @@ def prepare_checkpoint_for_hub(output_dir: str | Path) -> None:
         dependency_files = {
             "embeddings.py": "embeddings.py",
             "heads.py": "heads.py",
+            "savgol.py": "savgol.py",
         }
 
         for src_name, dest_name in dependency_files.items():

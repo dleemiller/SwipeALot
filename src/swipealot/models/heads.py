@@ -67,6 +67,15 @@ class PathPredictionHead(nn.Module):
             log_dt = torch.nn.functional.softplus(features[..., 5:6])
             return torch.cat([x_y, dx_dy, ds, log_dt], dim=-1)
 
+        if features.shape[-1] == 8:
+            # 8D SG features: (x, y, dx, dy, d2x, d2y, speed, curvature)
+            x_y = torch.sigmoid(2.0 * features[..., 0:2])  # [0, 1]
+            dx_dy = torch.tanh(features[..., 2:4])  # [-1, 1]
+            d2x_d2y = torch.tanh(features[..., 4:6])  # [-1, 1]
+            speed = torch.nn.functional.softplus(features[..., 6:7])  # >= 0
+            curvature = 2.0 * torch.tanh(features[..., 7:8])  # [-2, 2]
+            return torch.cat([x_y, dx_dy, d2x_d2y, speed, curvature], dim=-1)
+
         # Fallback: unconstrained regression for other output dims.
         return features
 

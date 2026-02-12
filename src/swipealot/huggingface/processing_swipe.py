@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from transformers import ProcessorMixin
 
-from ..data.preprocessing import preprocess_raw_path_to_features
+from ..data.preprocessing import preprocess_raw_path_to_sg_features
 
 
 class SwipeProcessor(ProcessorMixin):
@@ -32,7 +32,7 @@ class SwipeProcessor(ProcessorMixin):
         tokenizer=None,
         max_path_len: int = 64,
         max_char_len: int = 38,
-        path_input_dim: int = 6,
+        path_input_dim: int = 8,
         path_resample_mode: str = "time",
     ):
         self.tokenizer = tokenizer
@@ -68,8 +68,8 @@ class SwipeProcessor(ProcessorMixin):
                 - Raw path (single example): list of dicts like `{"x": ..., "y": ..., "t": ...}`
                 - Raw batch: list of raw paths
                 - Numeric arrays/tensors: `[batch, path_len, D]` or `[path_len, D]`
-                If `D==3` and `path_input_dim==6`, raw `(x,y,t)` triples are converted to engineered
-                `(x, y, dx, dy, ds, log_dt)` features and resampled to `max_path_len`.
+                If `D==3`, raw `(x,y,t)` triples are converted to 8D SG features
+                `(x, y, dx, dy, d2x, d2y, speed, curvature)` and resampled to `max_path_len`.
                 If omitted, the processor emits a zero path with a zero path attention mask.
             text:
                 String or list of strings to encode.
@@ -83,7 +83,7 @@ class SwipeProcessor(ProcessorMixin):
         Returns:
             Dictionary with:
                 - path_coords: [batch, max_path_len, path_input_dim] (if path_coords provided)
-                  Default: [batch, max_path_len, 6] for (x, y, dx, dy, ds, log_dt)
+                  Default: [batch, max_path_len, 8] for (x, y, dx, dy, d2x, d2y, speed, curvature)
                 - input_ids: [batch, max_char_len] (if text provided)
                 - attention_mask: [batch, total_seq_len] (covers `[CLS] + path + [SEP] + text`)
         """
@@ -200,7 +200,7 @@ class SwipeProcessor(ProcessorMixin):
             first_elem = path_coords[0]
 
             if isinstance(first_elem, dict) and "x" in first_elem:
-                path_feats, mask = preprocess_raw_path_to_features(
+                path_feats, mask = preprocess_raw_path_to_sg_features(
                     path_coords,
                     self.max_path_len,
                     resample_mode=self.path_resample_mode,
@@ -221,7 +221,7 @@ class SwipeProcessor(ProcessorMixin):
                 processed_paths = []
                 path_masks = []
                 for path in path_coords:
-                    path_feats, mask = preprocess_raw_path_to_features(
+                    path_feats, mask = preprocess_raw_path_to_sg_features(
                         path,
                         self.max_path_len,
                         resample_mode=self.path_resample_mode,
@@ -261,12 +261,12 @@ class SwipeProcessor(ProcessorMixin):
         if isinstance(path_coords, torch.Tensor):
             if path_coords.dim() == 2:
                 path_coords = path_coords.unsqueeze(0)
-            if path_coords.shape[-1] == 3 and self.path_input_dim == 6:
+            if path_coords.shape[-1] == 3:
                 processed_paths = []
                 path_masks = []
                 for path in path_coords.detach().cpu().numpy():
                     raw = [{"x": float(p[0]), "y": float(p[1]), "t": float(p[2])} for p in path]
-                    path_feats, mask = preprocess_raw_path_to_features(
+                    path_feats, mask = preprocess_raw_path_to_sg_features(
                         raw,
                         self.max_path_len,
                         resample_mode=self.path_resample_mode,

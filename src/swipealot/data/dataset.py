@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 
 from .preprocessing import (
     normalize_and_compute_features,
-    preprocess_raw_path_to_features,
+    preprocess_raw_path_to_sg_features,
     sample_path_points_with_features,
 )
 from .tokenizer import CharacterTokenizer
@@ -72,7 +72,7 @@ class SwipeDataset(Dataset):
         data_points = sample["data"]
 
         # Fast path: preprocess + resample in one pass (vectorized numpy).
-        path_features, path_mask = preprocess_raw_path_to_features(
+        path_features, path_mask = preprocess_raw_path_to_sg_features(
             data_points,
             self.max_path_len,
             resample_mode=self.path_resample_mode,
@@ -98,7 +98,7 @@ class SwipeDataset(Dataset):
         char_mask = [1 if token != self.tokenizer.pad_token_id else 0 for token in char_tokens]
 
         return {
-            "path_coords": torch.tensor(path_features, dtype=torch.float32),  # [max_path_len, 6]
+            "path_coords": torch.tensor(path_features, dtype=torch.float32),  # [max_path_len, 8]
             "char_tokens": torch.tensor(char_tokens, dtype=torch.long),  # [max_word_len]
             "path_mask": torch.tensor(path_mask, dtype=torch.long),  # [max_path_len]
             "char_mask": torch.tensor(char_mask, dtype=torch.long),  # [max_word_len]

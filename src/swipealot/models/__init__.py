@@ -12,6 +12,7 @@ from .embeddings import (
     TypeEmbedding,
 )
 from .heads import CharacterPredictionHead, PathPredictionHead
+from .savgol import SavgolPreprocessor
 
 __all__ = [
     "PathEmbedding",
@@ -21,4 +22,5 @@ __all__ = [
     "MixedEmbedding",
     "CharacterPredictionHead",
     "PathPredictionHead",
+    "SavgolPreprocessor",
 ]
