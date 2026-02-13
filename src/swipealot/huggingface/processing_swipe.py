@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from transformers import ProcessorMixin
+from transformers import PreTrainedTokenizerBase, ProcessorMixin
 
 from ..data.preprocessing import preprocess_raw_path_to_sg_features
 
@@ -35,7 +35,16 @@ class SwipeProcessor(ProcessorMixin):
         path_input_dim: int = 8,
         path_resample_mode: str = "time",
     ):
-        self.tokenizer = tokenizer
+        if isinstance(tokenizer, PreTrainedTokenizerBase):
+            super().__init__(tokenizer)
+        else:
+            # Non-HF tokenizer (e.g. CharacterTokenizer used in training):
+            # skip ProcessorMixin.__init__ which requires HF tokenizer types.
+            self.tokenizer = tokenizer
+            # Set optional attributes expected by ProcessorMixin.save_pretrained()
+            for attr in getattr(type(self), "optional_attributes", []):
+                if not hasattr(self, attr):
+                    setattr(self, attr, None)
         self.max_path_len = max_path_len
         self.max_char_len = max_char_len
         self.path_input_dim = path_input_dim
