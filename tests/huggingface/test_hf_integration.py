@@ -166,7 +166,7 @@ class TestProcessor:
         assert "path_coords" in inputs
         assert "input_ids" in inputs
         assert "attention_mask" in inputs
-        assert inputs["path_coords"].shape[-1] == 6
+        assert inputs["path_coords"].shape[-1] == 8
         # Check attention mask has correct length: [CLS] + path + [SEP] + chars
         assert inputs["attention_mask"].shape[1] == 1 + 32 + 1 + 20
 
@@ -235,7 +235,7 @@ class TestProcessor:
         ]
 
         inputs = processor(path_coords=raw_path, text=None, return_tensors="pt")
-        assert inputs["path_coords"].shape == (1, 16, 6)
+        assert inputs["path_coords"].shape == (1, 16, 8)
         assert inputs["input_ids"].shape == (1, 8)
 
         # Path-only: full attention to path segment, none to text segment.
@@ -249,7 +249,7 @@ class TestProcessor:
 
         path = np.array([[0.10, 0.20, 0.0], [0.20, 0.30, 10.0]], dtype=np.float32)
         inputs = processor(path_coords=path, text="hi", return_tensors="pt")
-        assert inputs["path_coords"].shape == (1, 16, 6)
+        assert inputs["path_coords"].shape == (1, 16, 8)
 
     def test_text_truncation_preserves_eos(self):
         tokenizer = SwipeTokenizer()
@@ -262,26 +262,26 @@ class TestProcessor:
     def test_tensor_path_is_padded_to_max_path_len(self):
         tokenizer = SwipeTokenizer()
         processor = SwipeProcessor(
-            tokenizer=tokenizer, max_path_len=32, max_char_len=20, path_input_dim=6
+            tokenizer=tokenizer, max_path_len=32, max_char_len=20, path_input_dim=8
         )
 
-        path = torch.zeros(1, 10, 6)
+        path = torch.zeros(1, 10, 8)
         path[0, :, 0] = 0.25
         path[0, :, 1] = 0.5
 
         inputs = processor(path_coords=path, text=None, return_tensors="pt")
-        assert inputs["path_coords"].shape == (1, 32, 6)
+        assert inputs["path_coords"].shape == (1, 32, 8)
         assert inputs["attention_mask"].shape[1] == 1 + 32 + 1 + 20
 
-    def test_numeric_list_path_with_6d_features_is_padded(self):
+    def test_numeric_list_path_with_8d_features_is_padded(self):
         tokenizer = SwipeTokenizer()
         processor = SwipeProcessor(
-            tokenizer=tokenizer, max_path_len=32, max_char_len=20, path_input_dim=6
+            tokenizer=tokenizer, max_path_len=32, max_char_len=20, path_input_dim=8
         )
 
-        path = [[0.1, 0.2, 0.0, 0.0, 0.0, 0.01] for _ in range(10)]
+        path = [[0.1, 0.2, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0] for _ in range(10)]
         inputs = processor(path_coords=path, text=None, return_tensors="pt")
-        assert inputs["path_coords"].shape == (1, 32, 6)
+        assert inputs["path_coords"].shape == (1, 32, 8)
         assert inputs["attention_mask"].shape[1] == 1 + 32 + 1 + 20
 
     def test_return_tensors_none_returns_python_lists_for_numeric_path(self):

@@ -19,7 +19,7 @@ def _sample(tokenizer: CharacterTokenizer, word: str, path_len: int, char_len: i
         [1 if t != tokenizer.pad_token_id else 0 for t in token_ids], dtype=torch.long
     )
     return {
-        "path_coords": torch.randn(path_len, 6),
+        "path_coords": torch.randn(path_len, 8),
         "path_mask": torch.ones(path_len, dtype=torch.long),
         "char_tokens": torch.tensor(token_ids, dtype=torch.long),
         "char_mask": char_mask,
@@ -50,7 +50,7 @@ def test_masked_collator_attention_and_labels():
     assert torch.all(batch["attention_mask"][:, -7:] == batch["char_mask"])
 
     # Path masking outputs exist and align in shape
-    assert batch["path_labels"].shape == (2, 5, 6)
+    assert batch["path_labels"].shape == (2, 5, 8)
     assert batch["path_mask_indices"].shape == (2, 5)
 
     # Character labels should ignore padding
@@ -159,7 +159,7 @@ def test_processor_accepts_raw_dict_paths():
     raw_path = [{"x": 0.1, "y": 0.2, "t": 1000.0}, {"x": 0.2, "y": 0.3, "t": 1010.0}]
     inputs = processor(path_coords=raw_path, text=None, return_tensors="pt")
 
-    assert inputs["path_coords"].shape == (1, processor.max_path_len, 6)
+    assert inputs["path_coords"].shape == (1, processor.max_path_len, 8)
     assert inputs["input_ids"].shape == (1, processor.max_char_len)
     assert (
         inputs["attention_mask"].shape[1] == 1 + processor.max_path_len + 1 + processor.max_char_len

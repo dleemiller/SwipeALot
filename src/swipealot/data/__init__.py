@@ -6,6 +6,7 @@ from .collators import (
     ValidationCollator,
 )
 from .dataset import SwipeDataset
+from .npz_swipe_dataset import NPZSwipeDataset
 from .tokenizer import (
     CharacterTokenizer,
     compute_char_frequency_weights,
@@ -14,6 +15,7 @@ from .tokenizer import (
 
 __all__ = [
     "CharacterTokenizer",
+    "NPZSwipeDataset",
     "SwipeDataset",
     "MaskedCollator",
     "PairwiseMaskedCollator",

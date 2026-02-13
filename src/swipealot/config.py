@@ -56,6 +56,9 @@ class DataConfig:
     mask_path: bool = True
     mask_vocab_only: bool = False  # Only mask vocabulary tokens (a-z, 0-9)
 
+    # Extra NPZ datasets to concatenate with the HuggingFace train split
+    extra_npz_paths: list[str] | None = None
+
     # DataLoader
     batch_size: int | None = None  # Deprecated; use training.training_args.per_device_* instead
     num_workers: int = 4

@@ -9,7 +9,7 @@ from swipealot.training import SwipeLoss
 
 
 def _make_sample(tokenizer: CharacterTokenizer, word: str, path_len: int, char_len: int):
-    path_coords = torch.randn(path_len, 6)
+    path_coords = torch.randn(path_len, 8)
     path_mask = torch.ones(path_len, dtype=torch.long)
 
     token_ids = tokenizer.encode(word) + [tokenizer.eos_token_id]
