@@ -25,6 +25,9 @@ data:
   char_mask_prob: 0.5      # Used by Masked/Validation collators only
   path_mask_prob: 0.5      # Used by Masked/Validation collators only
   mask_path: true
+  extra_npz_paths:
+    - "/home/lee/Documents/FUTO/encodercnn/data/npz/hws/"
+    - "/home/lee/Documents/FUTO/encodercnn/data/npz/staticwebtests_vocab_coverage_20260212/"
   num_workers: 4
 
 training:

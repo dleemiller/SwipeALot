@@ -12,6 +12,7 @@ from swipealot.config import Config
 from swipealot.data import (
     CharacterTokenizer,
     MaskedCollator,
+    NPZSwipeDataset,
     PairwiseMaskedCollator,
     SwipeDataset,
     ValidationCollator,
@@ -139,6 +140,25 @@ def main():
         max_samples=max_samples,
         path_resample_mode=config.data.path_resample_mode,
     )
+
+    # Optionally concatenate extra NPZ datasets
+    if config.data.extra_npz_paths:
+        from torch.utils.data import ConcatDataset
+
+        npz_datasets = []
+        for npz_path in config.data.extra_npz_paths:
+            npz_ds = NPZSwipeDataset(
+                npz_paths=npz_path,
+                tokenizer=tokenizer,
+                max_word_len=config.data.max_char_len,
+                max_samples=max_samples,
+            )
+            logger.info(
+                f"  Extra NPZ dataset: [cyan]{npz_path}[/cyan] → [green]{len(npz_ds):,}[/green] samples"
+            )
+            npz_datasets.append(npz_ds)
+        train_dataset = ConcatDataset([train_dataset] + npz_datasets)
+        logger.info(f"Combined train dataset: [green]{len(train_dataset):,}[/green] samples")
 
     val_dataset = SwipeDataset(
         split=config.data.val_split,
