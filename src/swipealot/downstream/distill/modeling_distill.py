@@ -395,6 +395,7 @@ class SwipeDistillModel(PreTrainedModel):
 
         # Compute CTC loss
         loss = None
+        length_loss_scalar = None
         if labels is not None and label_lengths is not None:
             log_probs = torch.log_softmax(logits, dim=-1)  # [B, T', num_chars+1]
             log_probs = log_probs.transpose(0, 1)  # [T', B, num_chars+1] for CTC
@@ -410,7 +411,6 @@ class SwipeDistillModel(PreTrainedModel):
             loss = ctc_loss
 
             # Add length prediction loss (Gaussian NLL, heteroscedastic)
-            length_loss_scalar = None
             if length_mean is not None and length_log_sigma is not None:
                 sigma = torch.clamp(torch.exp(length_log_sigma), min=self.config.length_sigma_min)
                 var = sigma * sigma
