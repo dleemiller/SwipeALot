@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 
 @dataclass
 class DistillModelConfig:
-    encoder_path: str = "checkpoints/base_20251217_211504/final"
+    encoder_path: str | None = "checkpoints/base_20251217_211504/final"
     freeze_encoder: bool = False  # Task adaptation: don't freeze
     encoder_lr_scale: float = 0.1  # Backbone LR = base_lr * 0.1
 
@@ -36,6 +36,19 @@ class DistillModelConfig:
     # Text masking
     text_mask_prob: float = 1.0  # 1.0 = full modality mode
 
+    # Length prediction head
+    predict_length: bool = False
+    length_hidden_dim: int = 64
+    length_loss_weight: float = 0.1
+    length_sigma_min: float = 0.01
+    length_detach: bool = True
+
+    # Load full distill model from a previous run (skips from_encoder_pretrained)
+    init_checkpoint: str | None = None
+
+    # Stage 0 (attention shaping) checkpoint for warm-starting encoder + projector
+    stage0_checkpoint: str | None = None
+
 
 @dataclass
 class DistillDataConfig:
@@ -46,6 +59,9 @@ class DistillDataConfig:
 
     # Extra NPZ datasets (path features + words, no attention needed)
     extra_npz_paths: list[str] = field(default_factory=list)
+
+    # Vocabulary file for trie-constrained beam search eval
+    vocab_path: str | None = None
 
     max_train_samples: int | None = None
     max_eval_samples: int | None = 10_000

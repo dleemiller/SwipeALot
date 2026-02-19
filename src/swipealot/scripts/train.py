@@ -62,7 +62,7 @@ def main():
 
     # Get base directories from training_args or use defaults
     base_output_dir = config.training.training_args.get("output_dir", "checkpoints")
-    base_log_dir = config.training.training_args.get("logging_dir", "logs")
+    base_log_dir = config.training.training_args.get("logging_dir", "logs/pretrain")
 
     # Update with unique run name
     output_dir = f"{base_output_dir}/{run_name}"

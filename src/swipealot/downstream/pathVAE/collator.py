@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from swipealot.data.masking_policies import reverse_char_tokens, reverse_path_coords
-from swipealot.data.preprocessing import preprocess_raw_path_to_features
+from swipealot.data.preprocessing import preprocess_raw_path_to_sg_features
 
 
 def _to_raw_dict_path(data) -> list[dict[str, float]]:
@@ -83,7 +83,7 @@ class SwipeTextToPathCVAECollator:
         input_paths = []
         for idx, p in enumerate(paths):
             raw = _to_raw_dict_path(p)
-            feats, m = preprocess_raw_path_to_features(
+            feats, m = preprocess_raw_path_to_sg_features(
                 raw,
                 max_path_len,
                 resample_mode=(

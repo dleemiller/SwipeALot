@@ -27,6 +27,11 @@ class SwipeDistillConfig(PretrainedConfig):
         blank_idx: int = 26,
         encoder_lr_scale: float = 0.1,
         text_mask_prob: float = 1.0,
+        predict_length: bool = False,
+        length_hidden_dim: int = 64,
+        length_loss_weight: float = 0.1,
+        length_sigma_min: float = 0.01,
+        length_detach: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -55,3 +60,10 @@ class SwipeDistillConfig(PretrainedConfig):
         self.blank_idx = int(blank_idx)
         self.encoder_lr_scale = float(encoder_lr_scale)
         self.text_mask_prob = float(text_mask_prob)
+
+        # Length prediction head
+        self.predict_length = bool(predict_length)
+        self.length_hidden_dim = int(length_hidden_dim)
+        self.length_loss_weight = float(length_loss_weight)
+        self.length_sigma_min = float(length_sigma_min)
+        self.length_detach = bool(length_detach)

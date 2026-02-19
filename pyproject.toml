@@ -33,6 +33,7 @@ validate = "swipealot.scripts.validate:main"
 train-distill = "swipealot.downstream.distill.train:main"
 keyboard-augment-batch = "swipealot.scripts.keyboard_augment_batch:main"
 blend-augmented = "swipealot.scripts.blend_augmented:main"
+train-attention-shaping = "swipealot.downstream.attention_shaping.train:main"
 
 [project.optional-dependencies]
 cu128 = [

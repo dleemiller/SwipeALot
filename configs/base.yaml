@@ -76,7 +76,7 @@ training:
     weight_decay: 0.01
     warmup_steps: 3600
     lr_scheduler_type: "cosine"
-    logging_dir: "logs"
+    logging_dir: "logs/pretrain"
     logging_steps: 10
     logging_strategy: "steps"
     eval_strategy: "steps"

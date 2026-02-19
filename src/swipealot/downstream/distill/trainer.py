@@ -4,10 +4,74 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import torch
 from transformers import Trainer
 
 logger = logging.getLogger(__name__)
+
+
+def _greedy_ctc_decode(logits: np.ndarray, blank_idx: int = 26) -> list[list[int]]:
+    """Greedy CTC decode: argmax, collapse repeats, remove blanks.
+
+    Args:
+        logits: [B, T, C] raw logits
+        blank_idx: index of the CTC blank token
+
+    Returns:
+        List of decoded index sequences per sample.
+    """
+    best = np.argmax(logits, axis=-1)  # [B, T]
+    decoded = []
+    for seq in best:
+        chars = []
+        prev = -1
+        for idx in seq:
+            if idx != prev:
+                if idx != blank_idx:
+                    chars.append(int(idx))
+            prev = idx
+        decoded.append(chars)
+    return decoded
+
+
+def _indices_to_word(indices: list[int]) -> str:
+    return "".join(chr(i + ord("a")) for i in indices)
+
+
+def _edit_distance_ops(a: list[int], b: list[int]) -> tuple[int, int, int, int]:
+    """Levenshtein distance with insertion/deletion/substitution counts.
+
+    Returns:
+        (distance, insertions, deletions, substitutions)
+    """
+    la, lb = len(a), len(b)
+    if la == 0:
+        return lb, lb, 0, 0
+    if lb == 0:
+        return la, 0, la, 0
+
+    # DP table: each cell is (dist, ins, del, sub)
+    prev = [(j, j, 0, 0) for j in range(lb + 1)]
+    for i in range(1, la + 1):
+        curr = [(i, 0, i, 0)] + [(0, 0, 0, 0)] * lb
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            # deletion from ref (hyp too short)
+            d_del = prev[j][0] + 1
+            # insertion into hyp (hyp too long)
+            d_ins = curr[j - 1][0] + 1
+            # substitution
+            d_sub = prev[j - 1][0] + cost
+
+            if d_del <= d_ins and d_del <= d_sub:
+                curr[j] = (d_del, prev[j][1], prev[j][2] + 1, prev[j][3])
+            elif d_ins <= d_sub:
+                curr[j] = (d_ins, curr[j - 1][1] + 1, curr[j - 1][2], curr[j - 1][3])
+            else:
+                curr[j] = (d_sub, prev[j - 1][1], prev[j - 1][2], prev[j - 1][3] + cost)
+        prev = curr
+    return prev[lb]
 
 
 class SwipeDistillTrainer(Trainer):
@@ -81,14 +145,51 @@ class SwipeDistillTrainer(Trainer):
             log_every = int(self.args.logging_steps) if int(self.args.logging_steps) > 0 else 1
             if step != self._last_log_step and step % log_every == 0:
                 log_items = {}
-                log_items["ctc_loss"] = float(loss.detach().cpu())
+                # Log CTC loss separately (outputs.loss includes length loss)
+                if outputs.ctc_loss is not None:
+                    log_items["ctc_loss"] = float(outputs.ctc_loss.detach().cpu())
+                else:
+                    log_items["ctc_loss"] = float(loss.detach().cpu())
+                if outputs.length_loss is not None:
+                    log_items["length_loss"] = float(outputs.length_loss.detach().cpu())
 
-                # Projector output stats
-                if outputs.projected is not None:
-                    proj = outputs.projected.detach()
-                    log_items["projector_mean"] = float(proj.mean().cpu())
-                    log_items["projector_std"] = float(proj.std().cpu())
-                    log_items["projector_norm"] = float(proj.norm(dim=1).mean().cpu())
+                if outputs.logits is not None:
+                    logits = outputs.logits.detach()
+                    blank_idx = int(self.model.config.blank_idx)
+                    probs = torch.softmax(logits, dim=-1)
+
+                    # Blank probability
+                    log_items["blank_prob"] = float(probs[:, :, blank_idx].mean().cpu())
+
+                    # Active frame rate (argmax != blank)
+                    best = logits.argmax(dim=-1)  # [B, T]
+                    log_items["active_frame_rate"] = float((best != blank_idx).float().mean().cpu())
+
+                    # CTC entropy (bits) — mean per-frame entropy of softmax distribution
+                    log_probs = torch.log_softmax(logits, dim=-1)
+                    entropy = -(probs * log_probs).sum(dim=-1)  # [B, T] nats
+                    log_items["ctc_entropy"] = float(
+                        (entropy / 0.6931).mean().cpu()
+                    )  # convert to bits
+
+                    # Greedy decode length
+                    shifted = torch.cat([torch.full_like(best[:, :1], -1), best[:, :-1]], dim=1)
+                    non_repeat = best != shifted
+                    non_blank = best != blank_idx
+                    decoded_lens = (non_repeat & non_blank).sum(dim=1).float()
+                    log_items["decoded_len"] = float(decoded_lens.mean().cpu())
+
+                # Length prediction diagnostics
+                if outputs.length_mean is not None and outputs.length_log_sigma is not None:
+                    lm = outputs.length_mean.detach()
+                    lls = outputs.length_log_sigma.detach()
+                    sigma_min = float(getattr(self.model.config, "length_sigma_min", 0.01))
+                    sigma = torch.clamp(torch.exp(lls), min=sigma_min)
+                    log_items["length_mean"] = float(lm.mean().cpu())
+                    log_items["length_sigma"] = float(sigma.mean().cpu())
+                    if "label_lengths" in inputs:
+                        target = inputs["label_lengths"].float()
+                        log_items["length_mae"] = float((lm - target).abs().mean().cpu())
 
                 if log_items:
                     self.log(log_items)
@@ -96,6 +197,26 @@ class SwipeDistillTrainer(Trainer):
 
         if return_outputs:
             return loss, outputs
+        return loss
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        """Override to log per-group grad norms after backward."""
+        loss = super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+
+        step = int(self.state.global_step)
+        log_every = int(self.args.logging_steps) if int(self.args.logging_steps) > 0 else 1
+        if step % log_every == 0 and self.optimizer is not None:
+            log_items = {}
+            for group in self.optimizer.param_groups:
+                name = group.get("name", "unknown")
+                total_norm = 0.0
+                for p in group["params"]:
+                    if p.grad is not None:
+                        total_norm += p.grad.data.norm(2).item() ** 2
+                log_items[f"grad_norm/{name}"] = total_norm**0.5
+            if log_items:
+                self.log(log_items)
+
         return loss
 
     def _save(self, output_dir, state_dict=None):
@@ -125,30 +246,254 @@ class SwipeDistillTrainer(Trainer):
         if prediction_loss_only:
             return (loss, None, None)
 
-        preds = outputs.logits  # [B, T', num_chars+1]
-        labels = (inputs.get("labels"), inputs.get("label_lengths"))
+        logits = outputs.logits.detach().cpu()  # [B, T', num_chars+1]
 
-        def _to_cpu(x):
-            if x is None:
-                return None
-            return x.detach().cpu() if isinstance(x, torch.Tensor) else x
+        # If length prediction is available, pack mean and log_sigma as extra
+        # columns appended to logits: [B, T'+1, C] where row T' holds
+        # [mean, log_sigma, 0, 0, ...]. This avoids changing the Trainer's
+        # prediction gathering which expects a single tensor.
+        if outputs.length_mean is not None and outputs.length_log_sigma is not None:
+            b, t, c = logits.shape
+            extra = torch.zeros(b, 1, c)
+            extra[:, 0, 0] = outputs.length_mean.detach().cpu()
+            extra[:, 0, 1] = outputs.length_log_sigma.detach().cpu()
+            preds = torch.cat([logits, extra], dim=1)  # [B, T'+1, C]
+        else:
+            preds = logits
 
-        preds = _to_cpu(preds)
-        labels = tuple(_to_cpu(x) for x in labels)
-        return (loss, preds, labels)
+        # Pack labels and label_lengths into a single tensor [B, max_label_len+1]
+        # so HF Trainer can gather them across processes correctly.
+        # Last column holds the length.
+        labels = inputs["labels"].detach().cpu()  # [B, L]
+        label_lengths = inputs["label_lengths"].detach().cpu()  # [B]
+        packed_labels = torch.cat([labels, label_lengths.unsqueeze(1)], dim=1)
+
+        return (loss, preds, packed_labels)
 
 
-def create_compute_metrics_fn():
-    """Return a compute_metrics function for CTC output."""
+def create_compute_metrics_fn(
+    blank_idx: int = 26,
+    trie=None,
+    beam_width: int = 10,
+    predict_length: bool = False,
+    length_sigma_min: float = 0.01,
+):
+    """Return a compute_metrics function for CTC output with word accuracy and CER.
+
+    Args:
+        blank_idx: CTC blank token index.
+        trie: Optional Trie for vocab-constrained beam search eval.
+        beam_width: Beam width for trie-constrained decoding.
+        predict_length: Whether length predictions are packed in logits.
+        length_sigma_min: Minimum sigma for length prediction.
+    """
+    beam_decoder = None
+    if trie is not None:
+        from swipealot.decoder import TrieBeamSearch
+
+        beam_decoder = TrieBeamSearch(
+            trie=trie,
+            beam_width=beam_width,
+            blank_idx=blank_idx,
+        )
+        logger.info(f"Vocab-constrained eval enabled: {len(trie)} words, beam_width={beam_width}")
 
     def compute_metrics(eval_pred):
-        preds = eval_pred.predictions
-        labels = eval_pred.label_ids
+        raw_logits = eval_pred.predictions  # [N, T'(+1), C]
+        packed_labels = eval_pred.label_ids  # [N, L+1]
 
-        if preds is None or labels is None:
+        if raw_logits is None or packed_labels is None:
             return {}
 
-        # For now, report average CTC loss (already in eval_loss)
-        return {}
+        # Unpack: last column is length
+        label_lengths = packed_labels[:, -1].astype(int)
+        labels = packed_labels[:, :-1]
+
+        # Extract length predictions if present (packed as extra row)
+        length_means = None
+        length_sigmas = None
+        if predict_length:
+            # Last time row holds [mean, log_sigma, 0, ...]
+            length_means = raw_logits[:, -1, 0]  # [N]
+            length_log_sigmas = raw_logits[:, -1, 1]  # [N]
+            length_sigmas = np.clip(np.exp(length_log_sigmas), a_min=length_sigma_min, a_max=None)
+            logits = raw_logits[:, :-1, :]  # [N, T', C]
+        else:
+            logits = raw_logits
+
+        decoded = _greedy_ctc_decode(logits, blank_idx=blank_idx)
+
+        n = len(decoded)
+        exact_matches = 0
+        total_edit_dist = 0
+        total_ins = 0
+        total_del = 0
+        total_sub = 0
+        total_ref_len = 0
+        wrong_examples = []
+
+        for i in range(n):
+            ref_len = label_lengths[i]
+            ref = labels[i, :ref_len].tolist()
+            hyp = decoded[i]
+
+            if hyp == ref:
+                exact_matches += 1
+            elif len(wrong_examples) < 20:
+                wrong_examples.append((_indices_to_word(ref), _indices_to_word(hyp)))
+
+            dist, ins, dels, subs = _edit_distance_ops(hyp, ref)
+            total_edit_dist += dist
+            total_ins += ins
+            total_del += dels
+            total_sub += subs
+            total_ref_len += max(ref_len, 1)
+
+        word_acc = exact_matches / max(n, 1)
+        cer = total_edit_dist / max(total_ref_len, 1)
+
+        # Blank / active frame stats
+        best = np.argmax(logits, axis=-1)  # [N, T']
+        blank_rate = float((best == blank_idx).mean())
+        active_frame_rate = 1.0 - blank_rate
+
+        # CTC entropy (bits)
+        log_probs = logits - np.log(np.exp(logits).sum(axis=-1, keepdims=True) + 1e-12)
+        probs = np.exp(log_probs)
+        entropy_nats = -(probs * log_probs).sum(axis=-1)  # [N, T']
+        ctc_entropy = float(entropy_nats.mean() / 0.6931)
+
+        # Decoded vs reference lengths
+        mean_decoded_len = sum(len(d) for d in decoded) / max(n, 1)
+        mean_ref_len = float(label_lengths.mean())
+
+        # Length prediction metrics
+        length_metrics = {}
+        if length_means is not None and length_sigmas is not None:
+            actual = label_lengths.astype(float)
+            errors = length_means - actual
+            abs_errors = np.abs(errors)
+
+            length_metrics["length_mae"] = float(abs_errors.mean())
+            length_metrics["length_rmse"] = float(np.sqrt((errors**2).mean()))
+            length_metrics["length_mean_sigma"] = float(length_sigmas.mean())
+            length_metrics["length_within_1sigma"] = float((abs_errors < length_sigmas).mean())
+            length_metrics["length_within_2sigma"] = float(
+                (abs_errors < 2.0 * length_sigmas).mean()
+            )
+            # Pearson correlation
+            if n > 1:
+                corr = np.corrcoef(length_means, actual)[0, 1]
+                length_metrics["length_corr"] = float(corr) if np.isfinite(corr) else 0.0
+
+        # Vocab-constrained beam search decoding
+        vocab_metrics = {}
+        if beam_decoder is not None:
+            import torch as _torch
+
+            vocab_correct = 0
+            vocab_top3 = 0
+            vocab_correct_lp = 0
+            vocab_top3_lp = 0
+            oov_words = 0
+
+            for i in range(n):
+                ref_len = label_lengths[i]
+                ref_word = _indices_to_word(labels[i, :ref_len].tolist())
+
+                if not beam_decoder.trie.search(ref_word):
+                    oov_words += 1
+                    continue
+
+                # beam_decoder.decode expects [T, C] (time-first)
+                sample_logits = _torch.from_numpy(logits[i])  # [T', C]
+
+                # Static length bonus (baseline)
+                candidates = beam_decoder.decode(sample_logits, top_k=3)
+                if candidates and candidates[0][0] == ref_word:
+                    vocab_correct += 1
+                if any(w == ref_word for w, _ in candidates[:3]):
+                    vocab_top3 += 1
+
+                # Length-prediction beam search (A/B comparison)
+                if length_means is not None:
+                    lp = (float(length_means[i]), float(length_sigmas[i]))
+                    candidates_lp = beam_decoder.decode(sample_logits, top_k=3, length_pred=lp)
+                    if candidates_lp and candidates_lp[0][0] == ref_word:
+                        vocab_correct_lp += 1
+                    if any(w == ref_word for w, _ in candidates_lp[:3]):
+                        vocab_top3_lp += 1
+
+            in_vocab = n - oov_words
+            vocab_metrics["vocab_word_acc"] = vocab_correct / max(in_vocab, 1)
+            vocab_metrics["vocab_top3_acc"] = vocab_top3 / max(in_vocab, 1)
+            vocab_metrics["oov_rate"] = oov_words / max(n, 1)
+            if length_means is not None:
+                vocab_metrics["vocab_word_acc_lp"] = vocab_correct_lp / max(in_vocab, 1)
+                vocab_metrics["vocab_top3_acc_lp"] = vocab_top3_lp / max(in_vocab, 1)
+
+        # Log sample errors to console with rich formatting
+        if wrong_examples:
+            from rich.console import Console
+            from rich.table import Table
+
+            console = Console()
+            table = Table(title="Sample Eval Errors", show_lines=False)
+            table.add_column("Reference", style="green")
+            table.add_column("Predicted", style="red")
+            table.add_column("Edit Dist", justify="right", style="yellow")
+            for ref_word, hyp_word in wrong_examples:
+                dist, _, _, _ = _edit_distance_ops(
+                    [ord(c) - ord("a") for c in ref_word],
+                    [ord(c) - ord("a") for c in hyp_word],
+                )
+                table.add_row(ref_word, hyp_word, str(dist))
+            console.print(table)
+
+            vocab_str = ""
+            if vocab_metrics:
+                vocab_str = (
+                    f"  vocab_acc=[cyan]{vocab_metrics['vocab_word_acc']:.3f}[/cyan]"
+                    f"  vocab_top3=[cyan]{vocab_metrics['vocab_top3_acc']:.3f}[/cyan]"
+                    f"  oov=[dim]{vocab_metrics['oov_rate']:.3f}[/dim]"
+                )
+                if "vocab_word_acc_lp" in vocab_metrics:
+                    vocab_str += (
+                        f"  vocab_acc_lp=[cyan]{vocab_metrics['vocab_word_acc_lp']:.3f}[/cyan]"
+                        f"  vocab_top3_lp=[cyan]{vocab_metrics['vocab_top3_acc_lp']:.3f}[/cyan]"
+                    )
+            length_str = ""
+            if length_metrics:
+                length_str = (
+                    f"  len_mae=[cyan]{length_metrics['length_mae']:.2f}[/cyan]"
+                    f"  len_1σ=[cyan]{length_metrics['length_within_1sigma']:.2f}[/cyan]"
+                    f"  len_σ=[dim]{length_metrics['length_mean_sigma']:.2f}[/dim]"
+                )
+            console.print(
+                f"[bold]Eval:[/bold] word_acc=[cyan]{word_acc:.3f}[/cyan]  "
+                f"cer=[cyan]{cer:.3f}[/cyan]  "
+                f"ins=[yellow]{total_ins / max(total_ref_len, 1):.3f}[/yellow]  "
+                f"del=[yellow]{total_del / max(total_ref_len, 1):.3f}[/yellow]  "
+                f"sub=[yellow]{total_sub / max(total_ref_len, 1):.3f}[/yellow]  "
+                f"blank=[dim]{blank_rate:.3f}[/dim]  "
+                f"entropy=[dim]{ctc_entropy:.2f}b[/dim]  "
+                f"len=[dim]{mean_decoded_len:.1f}/{mean_ref_len:.1f}[/dim]" + vocab_str + length_str
+            )
+
+        metrics = {
+            "word_acc": word_acc,
+            "cer": cer,
+            "ins_rate": total_ins / max(total_ref_len, 1),
+            "del_rate": total_del / max(total_ref_len, 1),
+            "sub_rate": total_sub / max(total_ref_len, 1),
+            "blank_rate": blank_rate,
+            "active_frame_rate": active_frame_rate,
+            "ctc_entropy": ctc_entropy,
+            "decoded_len": mean_decoded_len,
+            "ref_len": mean_ref_len,
+        }
+        metrics.update(length_metrics)
+        metrics.update(vocab_metrics)
+        return metrics
 
     return compute_metrics

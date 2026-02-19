@@ -30,9 +30,13 @@ from swipealot.huggingface.modeling_swipe import SwipeTransformerModel
 @dataclass
 class SwipeDistillOutput(ModelOutput):
     loss: torch.FloatTensor | None = None
+    ctc_loss: torch.FloatTensor | None = None  # CTC loss only (for logging)
+    length_loss: torch.FloatTensor | None = None  # Length loss only (for logging)
     logits: torch.FloatTensor | None = None  # [B, T', num_chars+1] CTC logits
     projected: torch.FloatTensor | None = None  # [B, D, 128] projector output (distillation target)
     encoder_last_hidden_state: torch.FloatTensor | None = None
+    length_mean: torch.FloatTensor | None = None  # [B] predicted word length mean
+    length_log_sigma: torch.FloatTensor | None = None  # [B] predicted log(sigma)
 
 
 class TemporalAdapter(nn.Module):
@@ -87,6 +91,39 @@ class TemporalAdapter(nn.Module):
         return self.layers(x)
 
 
+class CTCLengthHead(nn.Module):
+    """Predicts (mean, log_sigma) of word length from BiRNN final hidden state."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 2),
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, pooled: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            pooled: [B, input_dim] concatenated BiRNN final hidden states
+
+        Returns:
+            mean: [B] predicted word length (softplus, strictly positive)
+            log_sigma: [B] unconstrained log(sigma)
+        """
+        out = self.mlp(pooled)  # [B, 2]
+        mean = torch.nn.functional.softplus(out[:, 0])
+        log_sigma = out[:, 1]
+        return mean, log_sigma
+
+
 class CTCDecoder(nn.Module):
     """BiLSTM/BiGRU decoder with CTC head (matches encodercnn DirectCTCDecoder)."""
 
@@ -99,6 +136,9 @@ class CTCDecoder(nn.Module):
         rnn_type: str = "lstm",
         dropout: float = 0.1,
         num_chars: int = 26,
+        predict_length: bool = False,
+        length_hidden_dim: int = 64,
+        length_detach: bool = True,
     ):
         super().__init__()
         if input_dim != hidden_size:
@@ -107,6 +147,8 @@ class CTCDecoder(nn.Module):
             self.input_proj = nn.Identity()
         self.input_norm = nn.LayerNorm(hidden_size)
 
+        self.rnn_type = rnn_type
+        self.length_detach = length_detach
         rnn_class = nn.LSTM if rnn_type == "lstm" else nn.GRU
         self.rnn = rnn_class(
             input_size=hidden_size,
@@ -117,8 +159,14 @@ class CTCDecoder(nn.Module):
             dropout=dropout if num_layers > 1 else 0,
         )
 
-        rnn_output_dim = hidden_size * (2 if bidirectional else 1)
+        num_dirs = 2 if bidirectional else 1
+        rnn_output_dim = hidden_size * num_dirs
         self.ctc_head = nn.Linear(rnn_output_dim, num_chars + 1)  # +1 for blank
+
+        self.predict_length = predict_length
+        self.length_head = None
+        if predict_length:
+            self.length_head = CTCLengthHead(rnn_output_dim, length_hidden_dim)
 
         self._init_weights()
 
@@ -136,7 +184,9 @@ class CTCDecoder(nn.Module):
             elif "bias" in name:
                 nn.init.zeros_(param)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Forward from channel-first input.
 
         Args:
@@ -144,12 +194,34 @@ class CTCDecoder(nn.Module):
 
         Returns:
             logits: [B, T, num_chars+1]
+            length_mean: [B] or None if not predicting length
+            length_log_sigma: [B] or None if not predicting length
         """
         x = x.transpose(1, 2)  # [B, T, C]
         x = self.input_proj(x)
         x = self.input_norm(x)
-        x, _ = self.rnn(x)
-        return self.ctc_head(x)
+        rnn_out, h_n = self.rnn(x)
+
+        logits = self.ctc_head(rnn_out)
+
+        length_mean = None
+        length_log_sigma = None
+        if self.length_head is not None:
+            # h_n: LSTM returns (h_n, c_n), GRU returns h_n directly
+            if self.rnn_type == "lstm":
+                h = h_n[0]  # [num_layers*num_dirs, B, hidden]
+            else:
+                h = h_n  # [num_layers*num_dirs, B, hidden]
+            # Take final layer's forward and backward hidden states
+            # h shape: [num_layers*num_dirs, B, hidden]
+            # Last two entries are forward/backward of final layer
+            h_pool = h[-2:]
+            if self.length_detach:
+                h_pool = h_pool.detach()
+            pooled = h_pool.transpose(0, 1).contiguous().view(h.size(1), -1)  # [B, 2*hidden]
+            length_mean, length_log_sigma = self.length_head(pooled)
+
+        return logits, length_mean, length_log_sigma
 
 
 class SwipeDistillModel(PreTrainedModel):
@@ -164,8 +236,9 @@ class SwipeDistillModel(PreTrainedModel):
         d_model = int(encoder_cfg.d_model)
         self.max_path_len = int(encoder_cfg.max_path_len)
 
-        # Projector: 768 -> D
+        # Projector: 768 -> D, normalized for stable distillation targets
         self.projector = nn.Linear(d_model, config.projector_dim)
+        self.projector_norm = nn.LayerNorm(config.projector_dim)
 
         # Temporal adapter: [B, D, 128] -> [B, D, T'] (constant channels)
         self.temporal_adapter = TemporalAdapter(
@@ -185,6 +258,9 @@ class SwipeDistillModel(PreTrainedModel):
             rnn_type=config.rnn_type,
             dropout=config.rnn_dropout,
             num_chars=config.num_chars,
+            predict_length=config.predict_length,
+            length_hidden_dim=config.length_hidden_dim,
+            length_detach=config.length_detach,
         )
 
         self.ctc_loss_fn = nn.CTCLoss(blank=config.blank_idx, reduction="mean", zero_infinity=True)
@@ -308,14 +384,14 @@ class SwipeDistillModel(PreTrainedModel):
         # Extract path token representations [B, 128, d_model]
         path_reps = encoder_hidden[:, 1 : 1 + self.max_path_len, :]
 
-        # Project [B, 128, d_model] -> [B, 128, D] -> transpose -> [B, D, 128]
-        projected = self.projector(path_reps).transpose(1, 2)
+        # Project [B, 128, d_model] -> [B, 128, D] -> norm -> transpose -> [B, D, 128]
+        projected = self.projector_norm(self.projector(path_reps)).transpose(1, 2)
 
         # Temporal adapter: [B, D, 128] -> [B, D, T'] (constant channels)
         adapted = self.temporal_adapter(projected)
 
-        # CTC decoder: [B, D, T'] -> [B, T', num_chars+1]
-        logits = self.ctc_decoder(adapted)
+        # CTC decoder: [B, D, T'] -> [B, T', num_chars+1], optional length pred
+        logits, length_mean, length_log_sigma = self.ctc_decoder(adapted)
 
         # Compute CTC loss
         loss = None
@@ -330,16 +406,31 @@ class SwipeDistillModel(PreTrainedModel):
                 device=logits.device,
             )
 
-            loss = self.ctc_loss_fn(log_probs, labels, input_lengths, label_lengths)
+            ctc_loss = self.ctc_loss_fn(log_probs, labels, input_lengths, label_lengths)
+            loss = ctc_loss
+
+            # Add length prediction loss (Gaussian NLL, heteroscedastic)
+            length_loss_scalar = None
+            if length_mean is not None and length_log_sigma is not None:
+                sigma = torch.clamp(torch.exp(length_log_sigma), min=self.config.length_sigma_min)
+                var = sigma * sigma
+                target = label_lengths.float()
+                length_loss = 0.5 * (torch.log(var) + (target - length_mean) ** 2 / var)
+                length_loss_scalar = length_loss.mean()
+                loss = loss + self.config.length_loss_weight * length_loss_scalar
 
         if not return_dict:
             return loss, logits, projected, encoder_hidden
 
         return SwipeDistillOutput(
             loss=loss,
+            ctc_loss=ctc_loss if labels is not None else None,
+            length_loss=length_loss_scalar,
             logits=logits,
             projected=projected,
             encoder_last_hidden_state=encoder_hidden,
+            length_mean=length_mean,
+            length_log_sigma=length_log_sigma,
         )
 
     def get_encoder_params(self) -> list[nn.Parameter]:
@@ -350,9 +441,19 @@ class SwipeDistillModel(PreTrainedModel):
         """Get projector + adapter + decoder parameters (for normal LR)."""
         params = []
         params.extend(self.projector.parameters())
+        params.extend(self.projector_norm.parameters())
         params.extend(self.temporal_adapter.parameters())
         params.extend(self.ctc_decoder.parameters())
         return params
+
+    def get_length_head_state_dict(self) -> dict | None:
+        """Extract length head state dict (if present)."""
+        if self.ctc_decoder.length_head is None:
+            return None
+        state = {}
+        for k, v in self.ctc_decoder.length_head.state_dict().items():
+            state[f"ctc_decoder.length_head.{k}"] = v
+        return state
 
     def get_adapter_decoder_state_dict(self) -> dict:
         """Extract temporal adapter + CTC decoder state dicts for Phase 3 init."""

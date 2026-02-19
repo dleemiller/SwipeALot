@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from swipealot.data.preprocessing import preprocess_raw_path_to_features
+from swipealot.data.preprocessing import preprocess_raw_path_to_sg_features
 
 
 def _to_raw_dict_path(data) -> list[dict[str, float]]:
@@ -112,7 +112,7 @@ class SwipeDistillCollator:
 
         for p in paths:
             raw = _to_raw_dict_path(p)
-            feats, _ = preprocess_raw_path_to_features(
+            feats, _ = preprocess_raw_path_to_sg_features(
                 raw,
                 max_path_len,
                 resample_mode=(
