@@ -15,16 +15,9 @@ import torch
 import torch.nn as nn
 
 # Savitzky-Golay coefficients: window=7, poly=2
-SAVGOL_DERIV1 = [0.10714286, 0.07142857, 0.03571429, 0.0, -0.03571429, -0.07142857, -0.10714286]
-SAVGOL_DERIV2 = [
-    0.11904762,
-    0.02380952,
-    -0.04761905,
-    -0.0952381,
-    -0.04761905,
-    0.02380952,
-    0.11904762,
-]
+# From (X^T X)^{-1} X^T with positions [-3..+3]
+SAVGOL_DERIV1 = [-0.10714286, -0.07142857, -0.03571429, 0.0, 0.03571429, 0.07142857, 0.10714286]
+SAVGOL_DERIV2 = [0.05952381, 0.0, -0.03571429, -0.04761905, -0.03571429, 0.0, 0.05952381]
 
 
 class SavgolPreprocessor(nn.Module):

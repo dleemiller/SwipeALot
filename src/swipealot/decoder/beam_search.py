@@ -63,7 +63,6 @@ class TrieBeamSearch:
         use_frequency_weighting: bool = True,
         frequency_bonus: float = 0.4,
         length_bonus: float = 0.8,
-        length_weight: float = 1.0,
     ):
         """Initialize beam search decoder.
 
@@ -74,7 +73,6 @@ class TrieBeamSearch:
             use_frequency_weighting: Whether to boost common words
             frequency_bonus: Weight for log-frequency in scoring
             length_bonus: Bonus per character to offset CTC's short-word bias
-            length_weight: Weight for Gaussian length log-prob scoring
         """
         self.trie = trie
         self.beam_width = beam_width
@@ -82,46 +80,33 @@ class TrieBeamSearch:
         self.use_frequency_weighting = use_frequency_weighting
         self.frequency_bonus = frequency_bonus
         self.length_bonus = length_bonus
-        self.length_weight = length_weight
 
         # Character index to character mapping (a=0, b=1, ...)
         self.idx_to_char = {i: chr(ord("a") + i) for i in range(26)}
 
-    def _length_score(self, word_len: int, length_pred: tuple[float, float] | None) -> float:
-        """Compute length score for a candidate word.
+    def _length_score(self, word_len: int) -> float:
+        """Compute static length score for a candidate word.
 
-        Static length_bonus always applies (counteracts CTC short-word bias).
-        When length_pred is available, Gaussian log-prob is added on top to
-        prefer words near the predicted length.
+        Counteracts CTC's short-word bias by giving a per-character bonus.
 
         Args:
             word_len: Length of the candidate word
-            length_pred: (mean, sigma) from model, or None for static only
 
         Returns:
             Length score contribution
         """
-        score = self.length_bonus * word_len
-        if length_pred is not None:
-            mean, sigma = length_pred
-            z = (word_len - mean) / sigma
-            score += self.length_weight * (-0.5 * z * z)
-        return score
+        return self.length_bonus * word_len
 
     def decode(
         self,
         log_probs: torch.Tensor,
         top_k: int = 3,
-        length_pred: tuple[float, float] | None = None,
     ) -> list[tuple[str, float]]:
         """Decode CTC log probabilities to word candidates.
 
         Args:
             log_probs: [T, 27] log probabilities (time-first)
             top_k: Number of candidates to return
-            length_pred: Optional (mean, sigma) for Gaussian length scoring.
-                When provided, replaces static length_bonus with Gaussian
-                log-probability. Falls back to static bonus when None.
 
         Returns:
             List of (word, score) tuples, sorted by score descending
@@ -192,7 +177,7 @@ class TrieBeamSearch:
                 score = hyp.score
                 if self.use_frequency_weighting:
                     score += self.frequency_bonus * hyp.trie_node.log_frequency
-                score += self._length_score(len(hyp.text), length_pred)
+                score += self._length_score(len(hyp.text))
                 candidates.append((hyp.text, score))
 
         # Sort by final score and return top-k
@@ -203,14 +188,12 @@ class TrieBeamSearch:
         self,
         log_probs: torch.Tensor,
         top_k: int = 3,
-        length_preds: list[tuple[float, float]] | None = None,
     ) -> list[list[tuple[str, float]]]:
         """Decode batch of CTC log probabilities.
 
         Args:
             log_probs: [T, B, 27] log probabilities (time-first)
             top_k: Number of candidates per example
-            length_preds: Optional list of (mean, sigma) per batch element
 
         Returns:
             List of candidate lists, one per batch element
@@ -219,8 +202,7 @@ class TrieBeamSearch:
         results = []
 
         for b in range(n_batch):
-            lp = length_preds[b] if length_preds is not None else None
-            candidates = self.decode(log_probs[:, b, :], top_k=top_k, length_pred=lp)
+            candidates = self.decode(log_probs[:, b, :], top_k=top_k)
             results.append(candidates)
 
         return results
@@ -261,14 +243,12 @@ class TrieBeamSearch:
         self,
         log_probs: torch.Tensor,
         top_k: int = 3,
-        length_pred: tuple[float, float] | None = None,
     ) -> list[dict]:
         """Decode with detailed score breakdown.
 
         Args:
             log_probs: [T, 27] log probabilities
             top_k: Number of candidates
-            length_pred: Optional (mean, sigma) for Gaussian length scoring
 
         Returns:
             List of dicts with word, ctc_score, freq_score, length_score, final_score
@@ -335,7 +315,7 @@ class TrieBeamSearch:
                     if self.use_frequency_weighting
                     else 0.0
                 )
-                length_score = self._length_score(len(hyp.text), length_pred)
+                length_score = self._length_score(len(hyp.text))
                 results.append(
                     {
                         "word": hyp.text,

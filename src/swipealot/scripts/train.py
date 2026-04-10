@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 from datetime import datetime
 
 import torch
@@ -15,6 +16,7 @@ from swipealot.data import (
     NPZSwipeDataset,
     PairwiseMaskedCollator,
     SwipeDataset,
+    SwipeMultilingualDataset,
     ValidationCollator,
     vocab_hash,
 )
@@ -131,15 +133,30 @@ def main():
     logger.info("Loading datasets...")
     max_samples = 1000 if args.debug else None
 
-    train_dataset = SwipeDataset(
-        split=config.data.train_split,
-        max_path_len=config.data.max_path_len,
-        max_word_len=config.data.max_char_len,
-        tokenizer=tokenizer,
-        dataset_name=config.data.dataset_name,
-        max_samples=max_samples,
-        path_resample_mode=config.data.path_resample_mode,
-    )
+    multilingual_dataset = "futo-org/swipe-multilingual-compiled"
+    _use_multilingual = config.data.dataset_name == multilingual_dataset
+
+    if _use_multilingual:
+        exclude = set(config.data.exclude_sources) if config.data.exclude_sources else set()
+        train_dataset = SwipeMultilingualDataset(
+            split=config.data.train_split,
+            max_path_len=config.data.max_path_len,
+            max_word_len=config.data.max_char_len,
+            tokenizer=tokenizer,
+            exclude_sources=exclude,
+            max_samples=max_samples,
+            path_resample_mode=config.data.path_resample_mode,
+        )
+    else:
+        train_dataset = SwipeDataset(
+            split=config.data.train_split,
+            max_path_len=config.data.max_path_len,
+            max_word_len=config.data.max_char_len,
+            tokenizer=tokenizer,
+            dataset_name=config.data.dataset_name,
+            max_samples=max_samples,
+            path_resample_mode=config.data.path_resample_mode,
+        )
 
     # Optionally concatenate extra NPZ datasets
     if config.data.extra_npz_paths:
@@ -160,15 +177,26 @@ def main():
         train_dataset = ConcatDataset([train_dataset] + npz_datasets)
         logger.info(f"Combined train dataset: [green]{len(train_dataset):,}[/green] samples")
 
-    val_dataset = SwipeDataset(
-        split=config.data.val_split,
-        max_path_len=config.data.max_path_len,
-        max_word_len=config.data.max_char_len,
-        tokenizer=tokenizer,
-        dataset_name=config.data.dataset_name,
-        max_samples=max_samples // 10 if max_samples else 1000,  # Use 1k samples for validation
-        path_resample_mode=config.data.path_resample_mode,
-    )
+    if _use_multilingual:
+        val_dataset = SwipeMultilingualDataset(
+            split=config.data.val_split,
+            max_path_len=config.data.max_path_len,
+            max_word_len=config.data.max_char_len,
+            tokenizer=tokenizer,
+            exclude_sources=exclude,
+            max_samples=max_samples // 10 if max_samples else 1000,
+            path_resample_mode=config.data.path_resample_mode,
+        )
+    else:
+        val_dataset = SwipeDataset(
+            split=config.data.val_split,
+            max_path_len=config.data.max_path_len,
+            max_word_len=config.data.max_char_len,
+            tokenizer=tokenizer,
+            dataset_name=config.data.dataset_name,
+            max_samples=max_samples // 10 if max_samples else 1000,
+            path_resample_mode=config.data.path_resample_mode,
+        )
 
     logger.info(f"Train samples: [green]{len(train_dataset):,}[/green]")
     logger.info(f"Val samples: [green]{len(val_dataset):,}[/green]")
@@ -281,7 +309,8 @@ def main():
 
     # Override with run-specific settings
     training_args_dict["output_dir"] = output_dir
-    training_args_dict["logging_dir"] = log_dir
+    training_args_dict.pop("logging_dir", None)
+    os.environ["TENSORBOARD_LOGGING_DIR"] = log_dir
 
     # Override num_workers if specified in data config
     if config.data.num_workers:
@@ -323,6 +352,7 @@ def main():
         compute_metrics=compute_metrics,
         loss_fn=loss_fn,
         path_resample_mode=config.data.path_resample_mode,
+        min_lr_rate=config.training.min_lr_rate,
     )
 
     # Resume from checkpoint if specified

@@ -1,43 +1,42 @@
-# Stage 1: CTC + heteroscedastic length prediction
+# DFSMN decoder with CTC loss
 # Unfrozen encoder with moderate LR scale (0.05), 20 epochs.
-# Length prediction detached from BiRNN gradients during this stage.
 
 model:
-  encoder_path: "checkpoints/base_20260212_171550/final"
+  #encoder_path: "checkpoints/base_20260212_171550/final"
+  encoder_path: "checkpoints/base_20260406_173839/final"
   freeze_encoder: false
   encoder_lr_scale: 0.05  # encoder LR = 0.001 * 0.05 = 0.00005
 
   projector_dim: 128
   adapter_num_stages: 2
-  adapter_kernel_size: 5
+  adapter_kernel_size: 2
   adapter_stride: 2
+  adapter_double_channels: true  # 128→256 at last stage
 
-  rnn_type: lstm
-  rnn_hidden: 128
-  rnn_layers: 1
-  rnn_bidirectional: true
-  rnn_dropout: 0.1
+  # DFSMN decoder (replaces BiLSTM)
+  decoder_type: dfsmn
+  rnn_hidden: 256  # decoder hidden dimension (matches adapter output)
+  dfsmn_num_layers: 8
+  dfsmn_proj_dim: 64
+  dfsmn_context: 7
 
   num_chars: 26
   blank_idx: 26
   text_mask_prob: 1.0
 
-  # Length prediction head
-  predict_length: true
-  length_hidden_dim: 64
-  length_loss_weight: 0.1
-
 data:
-  dataset_name: "futo-org/swipe.futo.org"
+  dataset_name: "futo-org/swipe-multilingual-compiled"
+  dataset_config: "swipes"
   train_split: "train"
-  val_split: "validation"
+  val_split: "valid"
+  exclude_sources:
+    - "yandex"
+    - "indic_swipe"
   path_resample_mode: "time"
   vocab_path: "data/vocabulary.txt"
   extra_npz_paths:
-    - "/home/lee/Documents/FUTO/encodercnn/data/npz/hws/"
-    - "/home/lee/Documents/FUTO/encodercnn/data/npz/staticwebtests/"
-    - "/home/lee/Documents/FUTO/encodercnn/data/npz/blended_50/"
-    - "/home/lee/Documents/FUTO/encodercnn/data/npz/blended_50_full/"
+    - "/home/lee/Documents/FUTO/encodercnn/data/sal_npz/hws/"
+    - "/home/lee/Documents/FUTO/encodercnn/data/sal_npz/staticwebtests/"
   max_train_samples: null
   max_eval_samples: 10000
 
@@ -70,4 +69,3 @@ training:
     dataloader_num_workers: 4
     dataloader_pin_memory: true
     max_grad_norm: 1.0
-    save_safetensors: true

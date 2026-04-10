@@ -7,15 +7,37 @@ used by both the training dataset and the HuggingFace processor.
 import numpy as np
 
 # Savitzky-Golay coefficients: window=7, poly=2
+# From (X^T X)^{-1} X^T with positions [-3..+3]
 _SG_DERIV1 = np.array(
-    [0.10714286, 0.07142857, 0.03571429, 0.0, -0.03571429, -0.07142857, -0.10714286],
+    [-0.10714286, -0.07142857, -0.03571429, 0.0, 0.03571429, 0.07142857, 0.10714286],
     dtype=np.float32,
 )
 _SG_DERIV2 = np.array(
-    [0.11904762, 0.02380952, -0.04761905, -0.0952381, -0.04761905, 0.02380952, 0.11904762],
+    [0.05952381, 0.0, -0.03571429, -0.04761905, -0.03571429, 0.0, 0.05952381],
     dtype=np.float32,
 )
 _SG_HALF_W = 3  # (7 - 1) // 2
+
+_TARGET_HZ = 60
+_MS_PER_SAMPLE = 1000.0 / _TARGET_HZ  # ~16.67 ms at 60 Hz
+
+
+def _resample_to_60hz(x: np.ndarray, y: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Resample trajectory to uniform 60 Hz using timestamps (milliseconds).
+
+    Different data sources sample at 60/90/120 Hz.  Normalising to a
+    single rate before the fixed-length resampling ensures consistent
+    point density regardless of the original collection rate.
+    """
+    t_rel = t - t[0]
+    duration_ms = t_rel[-1]
+
+    if duration_ms < 1e-3:
+        return x, y
+
+    n_samples = max(2, round(duration_ms / _MS_PER_SAMPLE) + 1)
+    target_t = np.linspace(0.0, duration_ms, n_samples)
+    return np.interp(target_t, t_rel, x), np.interp(target_t, t_rel, y)
 
 
 def _sg_convolve_1d(x: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
@@ -66,29 +88,29 @@ def preprocess_raw_path_to_sg_features(
     x = np.clip(x, 0.0, 1.0)
     y = np.clip(y, 0.0, 1.0)
 
-    # --- resample (reuse logic from the 6D function) ---
-    dx_in = np.concatenate([[0.0], np.diff(x)])
-    dy_in = np.concatenate([[0.0], np.diff(y)])
-    ds_in = np.hypot(dx_in, dy_in)
-    dt_raw = np.concatenate([[0.0], np.diff(t)])
+    # --- normalise to 60 Hz so different collection rates are consistent ---
+    x, y = _resample_to_60hz(x, y, t)
+    n60 = len(x)
 
-    s = np.cumsum(ds_in)
-    tau = np.cumsum(dt_raw)
-
+    # --- resample to fixed length ---
     if resample_mode not in {"spatial", "time"}:
         raise ValueError(f"Unknown resample_mode={resample_mode!r}")
 
     eps = 1e-12
-    if resample_mode == "time" and tau[-1] > eps:
-        target_tau = np.linspace(0.0, float(tau[-1]), max_len, dtype=np.float64)
-        x_r = np.interp(target_tau, tau, x)
-        y_r = np.interp(target_tau, tau, y)
+    if resample_mode == "time":
+        # After 60 Hz resampling, points are already time-uniform,
+        # so index-based interpolation is equivalent.
+        idx = np.linspace(0, n60 - 1, max_len, dtype=np.float64)
+        x_r = np.interp(idx, np.arange(n60, dtype=np.float64), x)
+        y_r = np.interp(idx, np.arange(n60, dtype=np.float64), y)
     else:
+        dx_in = np.concatenate([[0.0], np.diff(x)])
+        dy_in = np.concatenate([[0.0], np.diff(y)])
+        s = np.cumsum(np.hypot(dx_in, dy_in))
         if s[-1] <= eps:
-            orig = np.arange(num_points, dtype=np.float64)
-            tgt = np.linspace(0, num_points - 1, max_len, dtype=np.float64)
-            x_r = np.interp(tgt, orig, x)
-            y_r = np.interp(tgt, orig, y)
+            idx = np.linspace(0, n60 - 1, max_len, dtype=np.float64)
+            x_r = np.interp(idx, np.arange(n60, dtype=np.float64), x)
+            y_r = np.interp(idx, np.arange(n60, dtype=np.float64), y)
         else:
             target_s = np.linspace(0.0, float(s[-1]), max_len, dtype=np.float64)
             x_r = np.interp(target_s, s, x)

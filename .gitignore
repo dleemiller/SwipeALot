@@ -41,3 +41,9 @@ tests/test_checkpoint_loading.py
 
 # Lock file
 uv.lock
+
+# Local data and artifacts
+/data/
+/tmp/
+/visualizations/
+*.zip

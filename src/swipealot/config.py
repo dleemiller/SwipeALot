@@ -56,6 +56,9 @@ class DataConfig:
     mask_path: bool = True
     mask_vocab_only: bool = False  # Only mask vocabulary tokens (a-z, 0-9)
 
+    # Sources to exclude (used by SwipeMultilingualDataset)
+    exclude_sources: list[str] | None = field(default_factory=lambda: ["yandex", "indic_swipe"])
+
     # Extra NPZ datasets to concatenate with the HuggingFace train split
     extra_npz_paths: list[str] | None = None
 
@@ -111,6 +114,9 @@ class TrainingConfig:
     # Matryoshka settings
     matryoshka_dims: list[int] | None = None
     matryoshka_weights: list[float] | None = None
+
+    # Learning rate schedule
+    min_lr_rate: float = 0.0  # Min LR as fraction of peak (0.1 = decay to 10% of peak)
 
     # HuggingFace TrainingArguments (passthrough for standard parameters)
     # This allows any standard HF argument to be passed without explicit definition

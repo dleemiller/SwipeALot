@@ -22,7 +22,6 @@ class CharacterTokenizer:
         self.mask_token = "[MASK]"
         self.unk_token = "[UNK]"
         self.eos_token = "[EOS]"  # End of word token
-        self.punc_token = "[PUNC]"
 
         self.special_tokens = [
             self.pad_token,  # 0
@@ -31,12 +30,10 @@ class CharacterTokenizer:
             self.mask_token,  # 3
             self.unk_token,  # 4
             self.eos_token,  # 5
-            self.punc_token,  # 6
         ]
 
-        # Build vocabulary deterministically (lowercase letters + digits).
+        # Build vocabulary deterministically (lowercase letters only).
         chars = set(chr(i) for i in range(ord("a"), ord("z") + 1))
-        chars.update(str(d) for d in range(10))
         if vocab is not None:
             # Allow explicit extension for special cases
             chars.update(vocab)
@@ -48,12 +45,12 @@ class CharacterTokenizer:
         self.id_to_char = {idx: char for char, idx in self.char_to_id.items()}
         self.vocab_size = len(self.char_to_id)
 
-    def encode_char(self, char: str) -> int:
-        """Encode a single character to a token id (case-insensitive; punctuation -> [PUNC])."""
+    def encode_char(self, char: str) -> int | None:
+        """Encode a single alpha character to a token id; returns None for non-alpha."""
         char = char.lower()
-        if char.isalpha() or char.isdigit():
+        if char.isalpha():
             return self.char_to_id.get(char, self.unk_token_id)
-        return self.punc_token_id
+        return None
 
     def token_to_id(self, token: str) -> int:
         """Map a token string to its id (supports specials and single characters)."""
@@ -61,14 +58,17 @@ class CharacterTokenizer:
         if direct is not None:
             return direct
         if len(token) == 1:
-            return self.encode_char(token)
+            result = self.encode_char(token)
+            return result if result is not None else self.unk_token_id
         return self.unk_token_id
 
     def encode(self, text: str) -> list[int]:
-        """Encode text to token IDs (case-insensitive, punctuation -> [PUNC])."""
+        """Encode text to token IDs, lowercasing and dropping non-alpha characters."""
         tokens = []
         for char in text.lower():
-            tokens.append(self.encode_char(char))
+            token_id = self.encode_char(char)
+            if token_id is not None:
+                tokens.append(token_id)
         return tokens
 
     def decode(self, token_ids: list[int]) -> str:
@@ -108,10 +108,6 @@ class CharacterTokenizer:
     @property
     def eos_token_id(self) -> int:
         return self.char_to_id[self.eos_token]
-
-    @property
-    def punc_token_id(self) -> int:
-        return self.char_to_id[self.punc_token]
 
 
 def vocab_hash(tokenizer: CharacterTokenizer) -> str:

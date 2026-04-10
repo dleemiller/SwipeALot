@@ -21,13 +21,17 @@ class DistillModelConfig:
     adapter_num_stages: int = 2  # 128 -> 32 with 2 stages
     adapter_kernel_size: int = 5
     adapter_stride: int = 2
+    adapter_double_channels: bool = False  # double channels at last adapter stage
+    adapter_fold_last_stage: bool = False  # replace last conv stage with channel fold
 
-    # RNN decoder (CTC)
-    rnn_type: str = "lstm"  # Match mobile target
-    rnn_hidden: int = 128
-    rnn_layers: int = 1
-    rnn_bidirectional: bool = True
-    rnn_dropout: float = 0.1
+    # Decoder
+    decoder_type: str = "dfsmn"
+    rnn_hidden: int = 128  # decoder hidden dimension
+
+    # DFSMN decoder
+    dfsmn_num_layers: int = 10
+    dfsmn_proj_dim: int = 64
+    dfsmn_context: int = 7
 
     # CTC
     num_chars: int = 26  # a-z
@@ -35,13 +39,6 @@ class DistillModelConfig:
 
     # Text masking
     text_mask_prob: float = 1.0  # 1.0 = full modality mode
-
-    # Length prediction head
-    predict_length: bool = False
-    length_hidden_dim: int = 64
-    length_loss_weight: float = 0.1
-    length_sigma_min: float = 0.01
-    length_detach: bool = True
 
     # Load full distill model from a previous run (skips from_encoder_pretrained)
     init_checkpoint: str | None = None
@@ -53,9 +50,11 @@ class DistillModelConfig:
 @dataclass
 class DistillDataConfig:
     dataset_name: str = "futo-org/swipe.futo.org"
+    dataset_config: str | None = None
     train_split: str = "train"
     val_split: str = "validation"
     path_resample_mode: str = "time"
+    exclude_sources: list[str] = field(default_factory=list)
 
     # Extra NPZ datasets (path features + words, no attention needed)
     extra_npz_paths: list[str] = field(default_factory=list)

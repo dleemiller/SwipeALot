@@ -75,7 +75,17 @@ class HFToWordDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        return {"word": item["word"], "data": item["data"]}
+        # Support both old format (data column) and multilingual format (points_x/y/t)
+        if "data" in item:
+            data = item["data"]
+        else:
+            data = [
+                {"x": x, "y": y, "t": t}
+                for x, y, t in zip(
+                    item["points_x"], item["points_y"], item["points_t"], strict=True
+                )
+            ]
+        return {"word": item["word"], "data": data}
 
 
 class SwipeDistillCollator:

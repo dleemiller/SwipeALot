@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -113,7 +114,7 @@ def main() -> None:
         description="Train distillation model (SwipeALot -> projector -> CTC)"
     )
     parser.add_argument(
-        "--config", type=str, default="configs/distill/base.yaml", help="Path to YAML config"
+        "--config", type=str, default="configs/distill/dfsmn.yaml", help="Path to YAML config"
     )
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
     parser.add_argument("--debug", action="store_true", help="Use small subset of data")
@@ -159,8 +160,15 @@ def main() -> None:
     max_samples = 2_000 if args.debug else None
 
     # HuggingFace dataset
-    hf_train = load_dataset(cfg.data.dataset_name, split=cfg.data.train_split)
-    hf_val = load_dataset(cfg.data.dataset_name, split=cfg.data.val_split)
+    hf_train = load_dataset(
+        cfg.data.dataset_name, cfg.data.dataset_config, split=cfg.data.train_split
+    )
+    hf_val = load_dataset(cfg.data.dataset_name, cfg.data.dataset_config, split=cfg.data.val_split)
+    if cfg.data.exclude_sources:
+        exclude = set(cfg.data.exclude_sources)
+        hf_train = hf_train.filter(lambda r: r["source"] not in exclude)
+        hf_val = hf_val.filter(lambda r: r["source"] not in exclude)
+        logger.info(f"After excluding {exclude}: train={len(hf_train):,}, val={len(hf_val):,}")
     hf_train = _maybe_slice(hf_train, cfg.data.max_train_samples or max_samples)
     hf_val = _maybe_slice(
         hf_val, cfg.data.max_eval_samples or (max_samples // 10 if max_samples else None)
@@ -213,19 +221,14 @@ def main() -> None:
     logger.info(f"  Projector dim: [yellow]{cfg.model.projector_dim}[/yellow]")
     logger.info(f"  Adapter stages: [yellow]{cfg.model.adapter_num_stages}[/yellow]")
     logger.info(
-        f"  RNN: [yellow]{cfg.model.rnn_type} h={cfg.model.rnn_hidden} l={cfg.model.rnn_layers}[/yellow]"
+        f"  DFSMN: [yellow]layers={cfg.model.dfsmn_num_layers} "
+        f"proj_dim={cfg.model.dfsmn_proj_dim} "
+        f"context={cfg.model.dfsmn_context} "
+        f"h={cfg.model.rnn_hidden}[/yellow]"
     )
     logger.info(f"  Text mask prob: [yellow]{cfg.model.text_mask_prob}[/yellow]")
     logger.info(f"  Encoder LR scale: [yellow]{cfg.model.encoder_lr_scale}[/yellow]")
     logger.info(f"  Freeze encoder: [yellow]{cfg.model.freeze_encoder}[/yellow]")
-    if cfg.model.predict_length:
-        logger.info(
-            f"  Length prediction: [yellow]ON[/yellow] "
-            f"(hidden={cfg.model.length_hidden_dim}, "
-            f"weight={cfg.model.length_loss_weight}, "
-            f"sigma_min={cfg.model.length_sigma_min}, "
-            f"detach={cfg.model.length_detach})"
-        )
 
     model_cfg = SwipeDistillConfig(
         encoder_config=None,
@@ -233,27 +236,22 @@ def main() -> None:
         adapter_num_stages=cfg.model.adapter_num_stages,
         adapter_kernel_size=cfg.model.adapter_kernel_size,
         adapter_stride=cfg.model.adapter_stride,
-        rnn_type=cfg.model.rnn_type,
+        adapter_double_channels=cfg.model.adapter_double_channels,
+        adapter_fold_last_stage=cfg.model.adapter_fold_last_stage,
         rnn_hidden=cfg.model.rnn_hidden,
-        rnn_layers=cfg.model.rnn_layers,
-        rnn_bidirectional=cfg.model.rnn_bidirectional,
-        rnn_dropout=cfg.model.rnn_dropout,
+        dfsmn_num_layers=cfg.model.dfsmn_num_layers,
+        dfsmn_proj_dim=cfg.model.dfsmn_proj_dim,
+        dfsmn_context=cfg.model.dfsmn_context,
         num_chars=cfg.model.num_chars,
         blank_idx=cfg.model.blank_idx,
         encoder_lr_scale=cfg.model.encoder_lr_scale,
         text_mask_prob=cfg.model.text_mask_prob,
-        predict_length=cfg.model.predict_length,
-        length_hidden_dim=cfg.model.length_hidden_dim,
-        length_loss_weight=cfg.model.length_loss_weight,
-        length_sigma_min=cfg.model.length_sigma_min,
-        length_detach=cfg.model.length_detach,
     )
     if cfg.model.init_checkpoint:
         # Load full distill model from a previous run, override config fields
         logger.info(f"Loading distill model from: [cyan]{cfg.model.init_checkpoint}[/cyan]")
         init_cfg = SwipeDistillConfig.from_pretrained(cfg.model.init_checkpoint)
-        init_cfg.length_detach = cfg.model.length_detach
-        init_cfg.length_loss_weight = cfg.model.length_loss_weight
+        init_cfg.decoder_type = cfg.model.decoder_type
         init_cfg.encoder_lr_scale = cfg.model.encoder_lr_scale
         model = SwipeDistillModel.from_pretrained(cfg.model.init_checkpoint, config=init_cfg)
         if cfg.model.freeze_encoder:
@@ -304,10 +302,10 @@ def main() -> None:
     # Training args
     training_args = dict(cfg.training.training_args)
     training_args["output_dir"] = output_dir
-    training_args["logging_dir"] = log_dir
+    training_args.pop("logging_dir", None)
+    os.environ["TENSORBOARD_LOGGING_DIR"] = log_dir
     training_args["run_name"] = run_name
     training_args.setdefault("remove_unused_columns", False)
-    training_args.setdefault("save_safetensors", True)
 
     hf_args = TrainingArguments(**training_args)
 
@@ -334,8 +332,6 @@ def main() -> None:
         compute_metrics=create_compute_metrics_fn(
             blank_idx=cfg.model.blank_idx,
             trie=trie,
-            predict_length=cfg.model.predict_length,
-            length_sigma_min=cfg.model.length_sigma_min,
         ),
         processor=processor,
     )

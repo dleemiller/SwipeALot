@@ -18,20 +18,17 @@ class SwipeDistillConfig(PretrainedConfig):
         adapter_num_stages: int = 2,
         adapter_kernel_size: int = 5,
         adapter_stride: int = 2,
-        rnn_type: str = "lstm",
+        adapter_double_channels: bool = False,
+        adapter_fold_last_stage: bool = False,
+        decoder_type: str = "dfsmn",
         rnn_hidden: int = 128,
-        rnn_layers: int = 1,
-        rnn_bidirectional: bool = True,
-        rnn_dropout: float = 0.1,
+        dfsmn_num_layers: int = 10,
+        dfsmn_proj_dim: int = 64,
+        dfsmn_context: int = 7,
         num_chars: int = 26,
         blank_idx: int = 26,
         encoder_lr_scale: float = 0.1,
         text_mask_prob: float = 1.0,
-        predict_length: bool = False,
-        length_hidden_dim: int = 64,
-        length_loss_weight: float = 0.1,
-        length_sigma_min: float = 0.01,
-        length_detach: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -51,19 +48,14 @@ class SwipeDistillConfig(PretrainedConfig):
         self.adapter_num_stages = int(adapter_num_stages)
         self.adapter_kernel_size = int(adapter_kernel_size)
         self.adapter_stride = int(adapter_stride)
-        self.rnn_type = str(rnn_type)
+        self.adapter_double_channels = bool(adapter_double_channels)
+        self.adapter_fold_last_stage = bool(adapter_fold_last_stage)
+        self.decoder_type = str(decoder_type)
         self.rnn_hidden = int(rnn_hidden)
-        self.rnn_layers = int(rnn_layers)
-        self.rnn_bidirectional = bool(rnn_bidirectional)
-        self.rnn_dropout = float(rnn_dropout)
+        self.dfsmn_num_layers = int(dfsmn_num_layers)
+        self.dfsmn_proj_dim = int(dfsmn_proj_dim)
+        self.dfsmn_context = int(dfsmn_context)
         self.num_chars = int(num_chars)
         self.blank_idx = int(blank_idx)
         self.encoder_lr_scale = float(encoder_lr_scale)
         self.text_mask_prob = float(text_mask_prob)
-
-        # Length prediction head
-        self.predict_length = bool(predict_length)
-        self.length_hidden_dim = int(length_hidden_dim)
-        self.length_loss_weight = float(length_loss_weight)
-        self.length_sigma_min = float(length_sigma_min)
-        self.length_detach = bool(length_detach)

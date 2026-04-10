@@ -5,7 +5,7 @@ description = "Swipe keyboard transformer model using multimodal embeddings"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "transformers>=4.57.1",
+    "transformers>=5.5.0",
     "datasets>=4.0.0",
     "huggingface_hub>=0.34.4",
     "tqdm>=4.66.4",
@@ -36,8 +36,8 @@ blend-augmented = "swipealot.scripts.blend_augmented:main"
 train-attention-shaping = "swipealot.downstream.attention_shaping.train:main"
 
 [project.optional-dependencies]
-cu128 = [
-    "torch>=2.8.0",
+cu13 = [
+    "torch>=2.11.0",
 ]
 dev = [
     "pytest>=8.3.3",
