@@ -325,10 +325,7 @@ def main() -> None:
         from swipealot.decoder import Trie
 
         vocab_path = Path(cfg.data.vocab_path)
-        if vocab_path.suffix == ".trie":
-            trie = Trie.load(vocab_path)
-        else:
-            trie = Trie.from_file(vocab_path)
+        trie = Trie.from_file(vocab_path)
         logger.info(f"Loaded vocabulary trie: [green]{len(trie):,}[/green] words from {vocab_path}")
 
     # Create trainer

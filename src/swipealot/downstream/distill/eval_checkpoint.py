@@ -100,10 +100,7 @@ def main():
 
     # Load trie
     vocab_path = Path(args.vocab)
-    if vocab_path.suffix == ".trie":
-        trie = Trie.load(vocab_path)
-    else:
-        trie = Trie.from_file(vocab_path)
+    trie = Trie.from_file(vocab_path)
     logger.info(f"Vocabulary: [green]{len(trie):,}[/green] words")
 
     beam_decoder = TrieBeamSearch(

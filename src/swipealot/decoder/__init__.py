@@ -1,4 +1,4 @@
 from .beam_search import TrieBeamSearch, prefix_beam_search
-from .trie import Trie, TrieNode
+from .trie import Trie
 
-__all__ = ["Trie", "TrieNode", "TrieBeamSearch", "prefix_beam_search"]
+__all__ = ["Trie", "TrieBeamSearch", "prefix_beam_search"]
