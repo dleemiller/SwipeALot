@@ -5,7 +5,7 @@ description = "Swipe keyboard transformer model using multimodal embeddings"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "transformers>=4.57.1",
+    "transformers>=5.5.0",
     "datasets>=4.0.0",
     "huggingface_hub>=0.34.4",
     "tqdm>=4.66.4",
@@ -33,10 +33,11 @@ validate = "swipealot.scripts.validate:main"
 train-distill = "swipealot.downstream.distill.train:main"
 keyboard-augment-batch = "swipealot.scripts.keyboard_augment_batch:main"
 blend-augmented = "swipealot.scripts.blend_augmented:main"
+train-attention-shaping = "swipealot.downstream.attention_shaping.train:main"
 
 [project.optional-dependencies]
-cu128 = [
-    "torch>=2.8.0",
+cu13 = [
+    "torch>=2.11.0",
 ]
 dev = [
     "pytest>=8.3.3",
@@ -49,7 +50,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["archive"]
+exclude = ["archive", "*.pyx"]
 
 [tool.ruff.lint]
 select = [
@@ -81,3 +82,9 @@ norecursedirs = ["archive", ".git", ".venv", "build", "dist", "__pycache__"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "cython>=3.2.4",
+    "setuptools>=80.9.0",
+]

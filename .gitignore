@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 *.so
+*.c
 
 # Distribution / packaging
 build/
@@ -41,3 +42,9 @@ tests/test_checkpoint_loading.py
 
 # Lock file
 uv.lock
+
+# Local data and artifacts
+/data/
+/tmp/
+/visualizations/
+*.zip

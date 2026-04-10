@@ -36,7 +36,7 @@ class MaskedCollator:
             path_mask_prob: Probability of masking each path point
             mask_path: Whether to mask path points
             mask_vocab_only: If True, only mask vocabulary tokens (a-z, 0-9),
-                           never mask special tokens ([EOS], [PUNC], [UNK])
+                           never mask special tokens ([EOS], [UNK])
         """
         self.tokenizer = tokenizer
         self.char_mask_prob = char_mask_prob

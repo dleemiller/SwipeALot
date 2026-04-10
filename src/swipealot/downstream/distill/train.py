@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -73,16 +74,39 @@ def _maybe_slice(dataset, n: int | None):
 
 
 class MixedCollator:
-    """Dispatches to HF or NPZ collator based on item keys."""
+    """Dispatches to HF or NPZ collator based on item keys.
+
+    Handles mixed batches from ConcatDataset where some items come from
+    HF (with ``data``) and others from NPZ (with ``path_features``).
+    """
 
     def __init__(self, *, hf_collator: SwipeDistillCollator, npz_collator: NPZDistillCollator):
         self.hf_collator = hf_collator
         self.npz_collator = npz_collator
 
     def __call__(self, items: list[dict]) -> dict[str, torch.Tensor]:
-        if "path_features" in items[0]:
-            return self.npz_collator(items)
-        return self.hf_collator(items)
+        hf_items = [it for it in items if "data" in it]
+        npz_items = [it for it in items if "path_features" in it]
+
+        batches = []
+        if hf_items:
+            batches.append(self.hf_collator(hf_items))
+        if npz_items:
+            batches.append(self.npz_collator(npz_items))
+
+        if len(batches) == 1:
+            return batches[0]
+
+        merged = {}
+        for key in batches[0]:
+            vals = [b[key] for b in batches]
+            if isinstance(vals[0], torch.Tensor):
+                merged[key] = torch.cat(vals, dim=0)
+            elif isinstance(vals[0], list):
+                merged[key] = [x for v in vals for x in v]
+            else:
+                merged[key] = vals[0]
+        return merged
 
 
 def main() -> None:
@@ -90,7 +114,7 @@ def main() -> None:
         description="Train distillation model (SwipeALot -> projector -> CTC)"
     )
     parser.add_argument(
-        "--config", type=str, default="configs/distill/base.yaml", help="Path to YAML config"
+        "--config", type=str, default="configs/distill/dfsmn.yaml", help="Path to YAML config"
     )
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
     parser.add_argument("--debug", action="store_true", help="Use small subset of data")
@@ -116,12 +140,13 @@ def main() -> None:
     logger.info(f"Using device: [green]{device}[/green]")
 
     # Load tokenizer+processor
-    logger.info(f"Loading encoder from: [cyan]{cfg.model.encoder_path}[/cyan]")
+    processor_path = cfg.model.init_checkpoint or cfg.model.encoder_path
+    logger.info(f"Loading processor from: [cyan]{processor_path}[/cyan]")
     try:
-        processor = SwipeProcessor.from_pretrained(cfg.model.encoder_path)
+        processor = SwipeProcessor.from_pretrained(processor_path)
         tokenizer = processor.tokenizer
     except Exception:
-        tokenizer = SwipeTokenizer.from_pretrained(cfg.model.encoder_path)
+        tokenizer = SwipeTokenizer.from_pretrained(processor_path)
         processor = SwipeProcessor(
             tokenizer=tokenizer,
             max_path_len=128,
@@ -135,8 +160,25 @@ def main() -> None:
     max_samples = 2_000 if args.debug else None
 
     # HuggingFace dataset
-    hf_train = load_dataset(cfg.data.dataset_name, split=cfg.data.train_split)
-    hf_val = load_dataset(cfg.data.dataset_name, split=cfg.data.val_split)
+    hf_train = load_dataset(
+        cfg.data.dataset_name, cfg.data.dataset_config, split=cfg.data.train_split
+    )
+    hf_val = load_dataset(cfg.data.dataset_name, cfg.data.dataset_config, split=cfg.data.val_split)
+    if cfg.data.exclude_sources:
+        exclude = set(cfg.data.exclude_sources)
+        hf_train = hf_train.filter(lambda r: r["source"] not in exclude)
+        hf_val = hf_val.filter(lambda r: r["source"] not in exclude)
+        logger.info(f"After excluding {exclude}: train={len(hf_train):,}, val={len(hf_val):,}")
+    if cfg.data.ot_cost_threshold is not None and "ot_cost" in hf_train.column_names:
+        thresh = cfg.data.ot_cost_threshold
+        before_train = len(hf_train)
+        before_val = len(hf_val)
+        hf_train = hf_train.filter(lambda r: r["ot_cost"] <= thresh)
+        hf_val = hf_val.filter(lambda r: r["ot_cost"] <= thresh)
+        logger.info(
+            f"After ot_cost <= {thresh}: train={len(hf_train):,} (-{before_train - len(hf_train):,}), "
+            f"val={len(hf_val):,} (-{before_val - len(hf_val):,})"
+        )
     hf_train = _maybe_slice(hf_train, cfg.data.max_train_samples or max_samples)
     hf_val = _maybe_slice(
         hf_val, cfg.data.max_eval_samples or (max_samples // 10 if max_samples else None)
@@ -189,7 +231,10 @@ def main() -> None:
     logger.info(f"  Projector dim: [yellow]{cfg.model.projector_dim}[/yellow]")
     logger.info(f"  Adapter stages: [yellow]{cfg.model.adapter_num_stages}[/yellow]")
     logger.info(
-        f"  RNN: [yellow]{cfg.model.rnn_type} h={cfg.model.rnn_hidden} l={cfg.model.rnn_layers}[/yellow]"
+        f"  DFSMN: [yellow]layers={cfg.model.dfsmn_num_layers} "
+        f"proj_dim={cfg.model.dfsmn_proj_dim} "
+        f"context={cfg.model.dfsmn_context} "
+        f"h={cfg.model.rnn_hidden}[/yellow]"
     )
     logger.info(f"  Text mask prob: [yellow]{cfg.model.text_mask_prob}[/yellow]")
     logger.info(f"  Encoder LR scale: [yellow]{cfg.model.encoder_lr_scale}[/yellow]")
@@ -201,21 +246,60 @@ def main() -> None:
         adapter_num_stages=cfg.model.adapter_num_stages,
         adapter_kernel_size=cfg.model.adapter_kernel_size,
         adapter_stride=cfg.model.adapter_stride,
-        rnn_type=cfg.model.rnn_type,
+        adapter_double_channels=cfg.model.adapter_double_channels,
+        adapter_fold_last_stage=cfg.model.adapter_fold_last_stage,
         rnn_hidden=cfg.model.rnn_hidden,
-        rnn_layers=cfg.model.rnn_layers,
-        rnn_bidirectional=cfg.model.rnn_bidirectional,
-        rnn_dropout=cfg.model.rnn_dropout,
+        dfsmn_num_layers=cfg.model.dfsmn_num_layers,
+        dfsmn_proj_dim=cfg.model.dfsmn_proj_dim,
+        dfsmn_context=cfg.model.dfsmn_context,
         num_chars=cfg.model.num_chars,
         blank_idx=cfg.model.blank_idx,
         encoder_lr_scale=cfg.model.encoder_lr_scale,
         text_mask_prob=cfg.model.text_mask_prob,
     )
-    model = SwipeDistillModel.from_encoder_pretrained(
-        cfg.model.encoder_path,
-        config=model_cfg,
-        freeze_encoder=bool(cfg.model.freeze_encoder),
-    )
+    if cfg.model.init_checkpoint:
+        # Load full distill model from a previous run, override config fields
+        logger.info(f"Loading distill model from: [cyan]{cfg.model.init_checkpoint}[/cyan]")
+        init_cfg = SwipeDistillConfig.from_pretrained(cfg.model.init_checkpoint)
+        init_cfg.decoder_type = cfg.model.decoder_type
+        init_cfg.encoder_lr_scale = cfg.model.encoder_lr_scale
+        model = SwipeDistillModel.from_pretrained(cfg.model.init_checkpoint, config=init_cfg)
+        if cfg.model.freeze_encoder:
+            for p in model.encoder.parameters():
+                p.requires_grad = False
+    else:
+        model = SwipeDistillModel.from_encoder_pretrained(
+            cfg.model.encoder_path,
+            config=model_cfg,
+            freeze_encoder=bool(cfg.model.freeze_encoder),
+        )
+
+    # Load stage 0 (attention shaping) weights if configured
+    if getattr(cfg.model, "stage0_checkpoint", None):
+        stage0_path = Path(cfg.model.stage0_checkpoint)
+        logger.info(f"Loading stage 0 weights from: [cyan]{stage0_path}[/cyan]")
+
+        # Load student encoder weights
+        student_encoder_path = stage0_path / "student_encoder"
+        if student_encoder_path.exists():
+            from swipealot.huggingface.modeling_swipe import SwipeTransformerModel
+
+            stage0_encoder = SwipeTransformerModel.from_pretrained(str(student_encoder_path))
+            model.encoder.load_state_dict(stage0_encoder.state_dict())
+            del stage0_encoder
+            logger.info("  Loaded student encoder weights")
+        else:
+            logger.warning(f"  Student encoder not found at {student_encoder_path}")
+
+        # Load projector + projector_norm weights
+        projector_path = stage0_path / "projector.pt"
+        if projector_path.exists():
+            projector_state = torch.load(str(projector_path), map_location="cpu", weights_only=True)
+            model.projector.load_state_dict(projector_state["projector"])
+            model.projector_norm.load_state_dict(projector_state["projector_norm"])
+            logger.info("  Loaded projector + projector_norm weights")
+        else:
+            logger.warning(f"  Projector weights not found at {projector_path}")
 
     # Count parameters
     encoder_params = sum(p.numel() for p in model.encoder.parameters())
@@ -228,12 +312,21 @@ def main() -> None:
     # Training args
     training_args = dict(cfg.training.training_args)
     training_args["output_dir"] = output_dir
-    training_args["logging_dir"] = log_dir
+    training_args.pop("logging_dir", None)
+    os.environ["TENSORBOARD_LOGGING_DIR"] = log_dir
     training_args["run_name"] = run_name
     training_args.setdefault("remove_unused_columns", False)
-    training_args.setdefault("save_safetensors", True)
 
     hf_args = TrainingArguments(**training_args)
+
+    # Load vocabulary trie for constrained beam search eval
+    trie = None
+    if cfg.data.vocab_path:
+        from swipealot.decoder import Trie
+
+        vocab_path = Path(cfg.data.vocab_path)
+        trie = Trie.from_file(vocab_path)
+        logger.info(f"Loaded vocabulary trie: [green]{len(trie):,}[/green] words from {vocab_path}")
 
     # Create trainer
     trainer = SwipeDistillTrainer(
@@ -243,7 +336,10 @@ def main() -> None:
         eval_dataset=val_dataset,
         data_collator=collator,
         eval_collator=val_collator if npz_datasets else None,
-        compute_metrics=create_compute_metrics_fn(),
+        compute_metrics=create_compute_metrics_fn(
+            blank_idx=cfg.model.blank_idx,
+            trie=trie,
+        ),
         processor=processor,
     )
 

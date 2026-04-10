@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from swipealot.downstream.distill import SwipeDistillConfig, SwipeDistillModel
 from swipealot.downstream.distill.collator import _encode_ctc_batch, _word_to_ctc_target
-from swipealot.downstream.distill.modeling_distill import CTCDecoder, TemporalAdapter
+from swipealot.downstream.distill.modeling_distill import DFSMNDecoder, TemporalAdapter
 from swipealot.huggingface.configuration_swipe import SwipeTransformerConfig
 
 
@@ -32,10 +32,9 @@ def _small_distill_cfg(enc_cfg=None):
         adapter_kernel_size=3,
         adapter_stride=2,
         rnn_hidden=32,
-        rnn_layers=1,
-        rnn_bidirectional=True,
-        rnn_type="lstm",
-        rnn_dropout=0.0,
+        dfsmn_num_layers=2,
+        dfsmn_proj_dim=16,
+        dfsmn_context=3,
         num_chars=26,
         blank_idx=26,
     )
@@ -168,13 +167,13 @@ def test_temporal_adapter_shapes():
     assert y.shape[2] == 32  # 128 / 2 / 2
 
 
-def test_ctc_decoder_identity_proj():
-    decoder = CTCDecoder(input_dim=128, hidden_size=128)
+def test_dfsmn_decoder_identity_proj():
+    decoder = DFSMNDecoder(input_dim=128, hidden_size=128)
     assert isinstance(decoder.input_proj, nn.Identity)
 
 
-def test_ctc_decoder_linear_proj():
-    decoder = CTCDecoder(input_dim=64, hidden_size=128)
+def test_dfsmn_decoder_linear_proj():
+    decoder = DFSMNDecoder(input_dim=64, hidden_size=128)
     assert isinstance(decoder.input_proj, nn.Linear)
     assert decoder.input_proj.in_features == 64
     assert decoder.input_proj.out_features == 128

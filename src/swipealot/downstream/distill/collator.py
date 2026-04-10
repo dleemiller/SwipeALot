@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from swipealot.data.preprocessing import preprocess_raw_path_to_features
+from swipealot.data.preprocessing import preprocess_raw_path_to_sg_features
 
 
 def _to_raw_dict_path(data) -> list[dict[str, float]]:
@@ -75,7 +75,17 @@ class HFToWordDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        return {"word": item["word"], "data": item["data"]}
+        # Support both old format (data column) and multilingual format (points_x/y/t)
+        if "data" in item:
+            data = item["data"]
+        else:
+            data = [
+                {"x": x, "y": y, "t": t}
+                for x, y, t in zip(
+                    item["points_x"], item["points_y"], item["points_t"], strict=True
+                )
+            ]
+        return {"word": item["word"], "data": data}
 
 
 class SwipeDistillCollator:
@@ -112,7 +122,7 @@ class SwipeDistillCollator:
 
         for p in paths:
             raw = _to_raw_dict_path(p)
-            feats, _ = preprocess_raw_path_to_features(
+            feats, _ = preprocess_raw_path_to_sg_features(
                 raw,
                 max_path_len,
                 resample_mode=(

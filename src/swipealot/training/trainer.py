@@ -1,13 +1,35 @@
 """Minimal HuggingFace Trainer subclass for SwipeALot with custom loss."""
 
 import logging
+import math
+from functools import partial
 
 import torch
+from torch.optim.lr_scheduler import LambdaLR
 from transformers import Trainer
 
 from .metrics import CharacterAccuracy
 
 logger = logging.getLogger(__name__)
+
+
+def _cosine_with_min_lr_lambda(
+    current_step: int,
+    *,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    num_cycles: float = 0.5,
+    min_lr_rate: float = 0.0,
+):
+    """Cosine schedule lambda with configurable minimum learning rate."""
+    if current_step < num_warmup_steps:
+        return float(current_step) / float(max(1, num_warmup_steps))
+    progress = float(current_step - num_warmup_steps) / float(
+        max(1, num_training_steps - num_warmup_steps)
+    )
+    factor = 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))
+    factor = factor * (1 - min_lr_rate) + min_lr_rate
+    return max(0, factor)
 
 
 class SwipeTrainer(Trainer):
@@ -20,7 +42,12 @@ class SwipeTrainer(Trainer):
     """
 
     def __init__(
-        self, loss_fn=None, eval_collator=None, path_resample_mode: str = "time", **kwargs
+        self,
+        loss_fn=None,
+        eval_collator=None,
+        path_resample_mode: str = "time",
+        min_lr_rate: float = 0.0,
+        **kwargs,
     ):
         """
         Initialize SwipeTrainer.
@@ -28,13 +55,45 @@ class SwipeTrainer(Trainer):
         Args:
             loss_fn: SwipeLoss instance for computing loss
             eval_collator: Optional separate collator for evaluation
+            min_lr_rate: Minimum LR as fraction of peak LR (0.0 = decay to zero,
+                0.1 = decay to 10% of peak). Only applies to cosine schedule.
             **kwargs: All other arguments passed to transformers.Trainer
         """
         super().__init__(**kwargs)
         self.loss_fn = loss_fn
         self.eval_collator = eval_collator
         self.path_resample_mode = path_resample_mode
+        self.min_lr_rate = min_lr_rate
         self._train_collator = self.data_collator
+
+    def create_scheduler(
+        self, num_training_steps: int, optimizer: torch.optim.Optimizer | None = None
+    ):
+        """Create LR scheduler, using min_lr_rate for cosine schedule."""
+        if self.lr_scheduler is not None:
+            return self.lr_scheduler
+
+        if optimizer is None:
+            optimizer = self.optimizer
+
+        if self.args.lr_scheduler_type == "cosine" and self.min_lr_rate > 0:
+            num_warmup_steps = self.args.get_warmup_steps(num_training_steps)
+            lr_lambda = partial(
+                _cosine_with_min_lr_lambda,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+                min_lr_rate=self.min_lr_rate,
+            )
+            self.lr_scheduler = LambdaLR(optimizer, lr_lambda)
+            self._created_lr_scheduler = True
+            logger.info(
+                f"Using cosine schedule with min_lr_rate={self.min_lr_rate} "
+                f"(min LR = {self.min_lr_rate * self.args.learning_rate:.2e})"
+            )
+        else:
+            return super().create_scheduler(num_training_steps, optimizer)
+
+        return self.lr_scheduler
 
     def _save(self, output_dir, state_dict=None):
         """
@@ -46,7 +105,7 @@ class SwipeTrainer(Trainer):
         self.model.save_pretrained(
             output_dir,
             state_dict=state_dict,
-            safe_serialization=self.args.save_safetensors,
+            safe_serialization=True,
         )
 
         # Prepare checkpoint for HuggingFace Hub

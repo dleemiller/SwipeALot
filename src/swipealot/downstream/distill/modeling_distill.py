@@ -6,7 +6,7 @@ Architecture:
         -> extract path token positions [B, 128, 768]
         -> Projector Linear(768, D) -> [B, 128, D] -> transpose -> [B, D, 128]
         -> TemporalAdapter (stride-2, constant channels) -> [B, D, 32]
-        -> BiLSTM (no input_proj) -> CTC logits -> CTC loss
+        -> DFSMN decoder -> CTC logits -> CTC loss
 
     No path_features concatenation: the projector output D channels already
     encode all path information via the transformer. Keeping D constant through
@@ -30,6 +30,7 @@ from swipealot.huggingface.modeling_swipe import SwipeTransformerModel
 @dataclass
 class SwipeDistillOutput(ModelOutput):
     loss: torch.FloatTensor | None = None
+    ctc_loss: torch.FloatTensor | None = None  # CTC loss only (for logging)
     logits: torch.FloatTensor | None = None  # [B, T', num_chars+1] CTC logits
     projected: torch.FloatTensor | None = None  # [B, D, 128] projector output (distillation target)
     encoder_last_hidden_state: torch.FloatTensor | None = None
@@ -45,15 +46,18 @@ class TemporalAdapter(nn.Module):
         kernel_size: int = 5,
         stride: int = 2,
         double_channels: bool = False,
+        fold_last_stage: bool = False,
     ):
         super().__init__()
         self.num_stages = num_stages
         self.stride = stride
+        self.fold_last_stage = fold_last_stage
 
+        conv_stages = num_stages - 1 if fold_last_stage else num_stages
         layers = []
         in_ch = input_channels
-        for _ in range(num_stages):
-            out_ch = in_ch * 2 if double_channels else in_ch
+        for stage_idx in range(conv_stages):
+            out_ch = in_ch * 2 if (double_channels and stage_idx == conv_stages - 1) else in_ch
             padding = (kernel_size - 1) // 2
             layers.extend(
                 [
@@ -71,8 +75,11 @@ class TemporalAdapter(nn.Module):
             )
             in_ch = out_ch
 
+        if fold_last_stage:
+            in_ch = in_ch * stride
+
         self.output_channels = in_ch
-        self.layers = nn.Sequential(*layers)
+        self.layers = nn.Sequential(*layers) if layers else nn.Identity()
         self._init_weights()
 
     def _init_weights(self):
@@ -84,20 +91,53 @@ class TemporalAdapter(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+        x = self.layers(x)
+        if self.fold_last_stage:
+            b, c, t = x.shape
+            x = x.view(b, c, t // self.stride, self.stride)
+            x = x.permute(0, 1, 3, 2).reshape(b, c * self.stride, t // self.stride)
+        return x
 
 
-class CTCDecoder(nn.Module):
-    """BiLSTM/BiGRU decoder with CTC head (matches encodercnn DirectCTCDecoder)."""
+class DFSMNBlock(nn.Module):
+    """Single DFSMN block with bottleneck projection and depthwise memory filter."""
+
+    def __init__(self, hidden_dim: int, proj_dim: int, context: int):
+        super().__init__()
+        self.project_down = nn.Linear(hidden_dim, proj_dim)
+        self.memory = nn.Conv1d(
+            proj_dim,
+            proj_dim,
+            kernel_size=2 * context + 1,
+            padding=context,
+            groups=proj_dim,
+            bias=False,
+        )
+        self.project_up = nn.Linear(proj_dim, hidden_dim)
+        self.activation = nn.Hardswish()
+
+    def forward(
+        self, x: torch.Tensor, prev_memory: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        p = self.project_down(x)  # [B, T, P]
+        p_mem = self.memory(p.transpose(1, 2)).transpose(1, 2)  # depthwise conv
+        p_tilde = p + p_mem
+        if prev_memory is not None:
+            p_tilde = p_tilde + prev_memory
+        h = self.activation(self.project_up(p_tilde))  # [B, T, H]
+        return h + x, p_tilde
+
+
+class DFSMNDecoder(nn.Module):
+    """DFSMN decoder with CTC head (ExecuTorch-friendly alternative to BiLSTM)."""
 
     def __init__(
         self,
         input_dim: int,
         hidden_size: int = 128,
-        num_layers: int = 1,
-        bidirectional: bool = True,
-        rnn_type: str = "lstm",
-        dropout: float = 0.1,
+        num_layers: int = 10,
+        proj_dim: int = 64,
+        context: int = 7,
         num_chars: int = 26,
     ):
         super().__init__()
@@ -107,18 +147,12 @@ class CTCDecoder(nn.Module):
             self.input_proj = nn.Identity()
         self.input_norm = nn.LayerNorm(hidden_size)
 
-        rnn_class = nn.LSTM if rnn_type == "lstm" else nn.GRU
-        self.rnn = rnn_class(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=dropout if num_layers > 1 else 0,
+        self.dfsmn_blocks = nn.ModuleList(
+            [DFSMNBlock(hidden_size, proj_dim, context) for _ in range(num_layers)]
         )
 
-        rnn_output_dim = hidden_size * (2 if bidirectional else 1)
-        self.ctc_head = nn.Linear(rnn_output_dim, num_chars + 1)  # +1 for blank
+        self.output_norm = nn.LayerNorm(hidden_size)
+        self.ctc_head = nn.Linear(hidden_size, num_chars + 1)  # +1 for blank
 
         self._init_weights()
 
@@ -128,13 +162,13 @@ class CTCDecoder(nn.Module):
             nn.init.zeros_(self.input_proj.bias)
         nn.init.trunc_normal_(self.ctc_head.weight, std=0.02)
         nn.init.zeros_(self.ctc_head.bias)
-        for name, param in self.rnn.named_parameters():
-            if "weight_ih" in name:
-                nn.init.xavier_uniform_(param)
-            elif "weight_hh" in name:
-                nn.init.orthogonal_(param)
-            elif "bias" in name:
-                nn.init.zeros_(param)
+        for block in self.dfsmn_blocks:
+            for m in block.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.trunc_normal_(m.weight, std=0.02)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv1d):
+                    nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward from channel-first input.
@@ -148,7 +182,12 @@ class CTCDecoder(nn.Module):
         x = x.transpose(1, 2)  # [B, T, C]
         x = self.input_proj(x)
         x = self.input_norm(x)
-        x, _ = self.rnn(x)
+
+        prev_memory = None
+        for block in self.dfsmn_blocks:
+            x, prev_memory = block(x, prev_memory)
+
+        x = self.output_norm(x)
         return self.ctc_head(x)
 
 
@@ -164,8 +203,9 @@ class SwipeDistillModel(PreTrainedModel):
         d_model = int(encoder_cfg.d_model)
         self.max_path_len = int(encoder_cfg.max_path_len)
 
-        # Projector: 768 -> D
+        # Projector: 768 -> D, normalized for stable distillation targets
         self.projector = nn.Linear(d_model, config.projector_dim)
+        self.projector_norm = nn.LayerNorm(config.projector_dim)
 
         # Temporal adapter: [B, D, 128] -> [B, D, T'] (constant channels)
         self.temporal_adapter = TemporalAdapter(
@@ -173,17 +213,17 @@ class SwipeDistillModel(PreTrainedModel):
             num_stages=config.adapter_num_stages,
             kernel_size=config.adapter_kernel_size,
             stride=config.adapter_stride,
-            double_channels=False,
+            double_channels=getattr(config, "adapter_double_channels", False),
+            fold_last_stage=getattr(config, "adapter_fold_last_stage", False),
         )
 
-        # CTC decoder (no input_proj when adapter output == rnn_hidden)
-        self.ctc_decoder = CTCDecoder(
+        # CTC decoder (DFSMN)
+        self.ctc_decoder = DFSMNDecoder(
             input_dim=self.temporal_adapter.output_channels,
             hidden_size=config.rnn_hidden,
-            num_layers=config.rnn_layers,
-            bidirectional=config.rnn_bidirectional,
-            rnn_type=config.rnn_type,
-            dropout=config.rnn_dropout,
+            num_layers=getattr(config, "dfsmn_num_layers", 10),
+            proj_dim=getattr(config, "dfsmn_proj_dim", 64),
+            context=getattr(config, "dfsmn_context", 7),
             num_chars=config.num_chars,
         )
 
@@ -308,8 +348,8 @@ class SwipeDistillModel(PreTrainedModel):
         # Extract path token representations [B, 128, d_model]
         path_reps = encoder_hidden[:, 1 : 1 + self.max_path_len, :]
 
-        # Project [B, 128, d_model] -> [B, 128, D] -> transpose -> [B, D, 128]
-        projected = self.projector(path_reps).transpose(1, 2)
+        # Project [B, 128, d_model] -> [B, 128, D] -> norm -> transpose -> [B, D, 128]
+        projected = self.projector_norm(self.projector(path_reps)).transpose(1, 2)
 
         # Temporal adapter: [B, D, 128] -> [B, D, T'] (constant channels)
         adapted = self.temporal_adapter(projected)
@@ -319,6 +359,7 @@ class SwipeDistillModel(PreTrainedModel):
 
         # Compute CTC loss
         loss = None
+        ctc_loss = None
         if labels is not None and label_lengths is not None:
             log_probs = torch.log_softmax(logits, dim=-1)  # [B, T', num_chars+1]
             log_probs = log_probs.transpose(0, 1)  # [T', B, num_chars+1] for CTC
@@ -330,13 +371,15 @@ class SwipeDistillModel(PreTrainedModel):
                 device=logits.device,
             )
 
-            loss = self.ctc_loss_fn(log_probs, labels, input_lengths, label_lengths)
+            ctc_loss = self.ctc_loss_fn(log_probs, labels, input_lengths, label_lengths)
+            loss = ctc_loss
 
         if not return_dict:
             return loss, logits, projected, encoder_hidden
 
         return SwipeDistillOutput(
             loss=loss,
+            ctc_loss=ctc_loss,
             logits=logits,
             projected=projected,
             encoder_last_hidden_state=encoder_hidden,
@@ -350,6 +393,7 @@ class SwipeDistillModel(PreTrainedModel):
         """Get projector + adapter + decoder parameters (for normal LR)."""
         params = []
         params.extend(self.projector.parameters())
+        params.extend(self.projector_norm.parameters())
         params.extend(self.temporal_adapter.parameters())
         params.extend(self.ctc_decoder.parameters())
         return params
