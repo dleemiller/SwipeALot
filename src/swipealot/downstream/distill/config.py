@@ -56,6 +56,9 @@ class DistillDataConfig:
     path_resample_mode: str = "time"
     exclude_sources: list[str] = field(default_factory=list)
 
+    # OT cost filter: remove samples with optimal transport cost above threshold
+    ot_cost_threshold: float | None = 0.04
+
     # Extra NPZ datasets (path features + words, no attention needed)
     extra_npz_paths: list[str] = field(default_factory=list)
 

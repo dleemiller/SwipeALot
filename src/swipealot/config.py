@@ -59,6 +59,9 @@ class DataConfig:
     # Sources to exclude (used by SwipeMultilingualDataset)
     exclude_sources: list[str] | None = field(default_factory=lambda: ["yandex", "indic_swipe"])
 
+    # OT cost filter: remove samples with optimal transport cost above threshold
+    ot_cost_threshold: float | None = 0.04
+
     # Extra NPZ datasets to concatenate with the HuggingFace train split
     extra_npz_paths: list[str] | None = None
 

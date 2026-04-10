@@ -146,6 +146,7 @@ def main():
             exclude_sources=exclude,
             max_samples=max_samples,
             path_resample_mode=config.data.path_resample_mode,
+            ot_cost_threshold=config.data.ot_cost_threshold,
         )
     else:
         train_dataset = SwipeDataset(
@@ -186,6 +187,7 @@ def main():
             exclude_sources=exclude,
             max_samples=max_samples // 10 if max_samples else 1000,
             path_resample_mode=config.data.path_resample_mode,
+            ot_cost_threshold=config.data.ot_cost_threshold,
         )
     else:
         val_dataset = SwipeDataset(

@@ -39,6 +39,7 @@ class SwipeMultilingualDataset(Dataset):
         exclude_sources: frozenset[str] | set[str] = _DEFAULT_EXCLUDE_SOURCES,
         max_samples: int | None = None,
         path_resample_mode: str = "time",
+        ot_cost_threshold: float | None = 0.04,
     ):
         self.max_path_len = max_path_len
         self.max_word_len = max_word_len
@@ -51,6 +52,13 @@ class SwipeMultilingualDataset(Dataset):
         if exclude_sources:
             ds = ds.filter(lambda r: r["source"] not in exclude_sources)
             print(f"After excluding {set(exclude_sources)}: {len(ds):,} samples")
+
+        if ot_cost_threshold is not None and "ot_cost" in ds.column_names:
+            before = len(ds)
+            ds = ds.filter(lambda r: r["ot_cost"] <= ot_cost_threshold)
+            print(
+                f"After ot_cost <= {ot_cost_threshold}: {len(ds):,} samples (removed {before - len(ds):,})"
+            )
 
         if max_samples is not None:
             ds = ds.select(range(min(max_samples, len(ds))))

@@ -169,6 +169,16 @@ def main() -> None:
         hf_train = hf_train.filter(lambda r: r["source"] not in exclude)
         hf_val = hf_val.filter(lambda r: r["source"] not in exclude)
         logger.info(f"After excluding {exclude}: train={len(hf_train):,}, val={len(hf_val):,}")
+    if cfg.data.ot_cost_threshold is not None and "ot_cost" in hf_train.column_names:
+        thresh = cfg.data.ot_cost_threshold
+        before_train = len(hf_train)
+        before_val = len(hf_val)
+        hf_train = hf_train.filter(lambda r: r["ot_cost"] <= thresh)
+        hf_val = hf_val.filter(lambda r: r["ot_cost"] <= thresh)
+        logger.info(
+            f"After ot_cost <= {thresh}: train={len(hf_train):,} (-{before_train - len(hf_train):,}), "
+            f"val={len(hf_val):,} (-{before_val - len(hf_val):,})"
+        )
     hf_train = _maybe_slice(hf_train, cfg.data.max_train_samples or max_samples)
     hf_val = _maybe_slice(
         hf_val, cfg.data.max_eval_samples or (max_samples // 10 if max_samples else None)
